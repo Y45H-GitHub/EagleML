@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Skin Analysis App</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 2em;
+      }
+      input[type="file"] {
+        margin-bottom: 1em;
+      }
+      #result {
+        margin-top: 1em;
+        white-space: pre-wrap;
+        background-color: #f7f7f7;
+        padding: 1em;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Skin Analysis App</h1>
+
+    <form id="uploadForm">
+      <input type="file" id="imageInput" accept="image/*" required />
+      <br />
+      <button type="submit">Analyze Image</button>
+    </form>
+
+    <div id="result"></div>
+
+    <script>
+      const form = document.getElementById("uploadForm");
+      const resultDiv = document.getElementById("result");
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+
+        const imageFile = document.getElementById("imageInput").files[0];
+        if (!imageFile) {
+          alert("Please select an image first.");
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append("image", imageFile);
+
+        resultDiv.textContent = "Processing...";
+
+        try {
+          const response = await fetch("/analyze", {
+            method: "POST",
+            body: formData,
+          });
+
+          const data = await response.json();
+          if (response.ok) {
+            resultDiv.textContent = JSON.stringify(data, null, 2);
+          } else {
+            resultDiv.textContent = "Error: " + data.error;
+          }
+        } catch (error) {
+          resultDiv.textContent = "Error: " + error.message;
+        }
+      });
+    </script>
+  </body>
+</html>

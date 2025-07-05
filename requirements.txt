@@ -1,0 +1,11 @@
+flask
+opencv-python
+mediapipe==0.10.8
+scikit-image
+numpy
+Pillow
+matplotlib
+torch
+torchvision
+scipy
+scikit-learn
