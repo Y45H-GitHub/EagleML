@@ -9,3 +9,5 @@ torch
 torchvision
 scipy
 scikit-learn
+requests
+pika
