@@ -41,7 +41,7 @@ from skimage import measure
 
 
 
-image_path = r"C:\Users\Yash\Desktop\face_app_final\myface.jpg"  # Path to your image
+image_path = r"C:\Users\Pritam\Programming\python\EagleML\myface.jpg"  # Path to your image
 
 ####################################FOREHEAD PATCH#######################################
 # !git clone https://github.com/wonbeomjang/mobile-hair-segmentation-pytorch.git
@@ -66,7 +66,7 @@ def get_hair_mask(image_path, output_path="hair_mask.png"):
 
     
     # --- Load full image ---
-img_path = r"C:\Users\Yash\Desktop\face_app_final\myface.jpg"  # test image path
+img_path = r"C:\Users\Pritam\Programming\python\EagleML\myface.jpg"  # test image path
 img_cv = cv2.imread(img_path)
 
 if img_cv is None:
@@ -591,7 +591,14 @@ def compute_image_score(img_rgb):
     v_vals = np.linspace(0, 255, 256)
     kde_vals = kde(v_vals)
     diffs = np.diff(kde_vals)
-    valleys = np.where((np.hstack(([False], diffs[:-1] < 0)) & (np.hstack((diffs[1:] > 0, [False]))))[0])
+    if diffs.ndim == 0 or diffs.size < 2:
+        valleys = []
+    else:
+        # valleys = np.where((np.hstack(([False], diffs[:-1] < 0)) & (np.hstack((diffs[1:] > 0, [False]))))[0])
+        condition = (np.hstack(([False], diffs[:-1] < 0)) & np.hstack((diffs[1:] > 0, [False])))
+        valleys = np.where(condition)[0]
+
+
     if len(valleys) >= 2:
         v_thresh1 = int(v_vals[valleys[0]])
         v_thresh2 = int(v_vals[valleys[1]])
