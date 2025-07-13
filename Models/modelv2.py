@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import os
 from torchvision.models.mobilenet import mobilenet_v2
 
 from mobile_hair_segmentation_pytorch.models.blocks import LayerDepwiseDecode
@@ -9,7 +10,14 @@ class MobileHairNetV2(nn.Module):
     def __init__(self, decode_block=LayerDepwiseDecode, *args, **kwargs):
         super(MobileHairNetV2, self).__init__()
         self.mobilenet = mobilenet_v2(pretrained=False, *args, **kwargs)
-        self.mobilenet.load_state_dict(torch.load("Models\mobilenet_v2_pretrained.pth"))
+        
+        weights_path = os.path.join("Models", "mobilenet_v2_pretrained.pth")
+        if not os.path.isfile(weights_path):
+            raise FileNotFoundError(f"❌ File not found: {weights_path}")
+        
+        self.mobilenet.load_state_dict(torch.load(weights_path), strict=False)
+        print("✅ MobileNetV2 weights loaded.")
+
         self.decode_block = decode_block
         self.make_layers()
         self.__init__weight()
