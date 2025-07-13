@@ -20,7 +20,7 @@ class MobileHairNetV2(nn.Module):
 
         self.decode_block = decode_block
         self.make_layers()
-        self.__init__weight()
+        self._init_weight()
 
     def make_layers(self):
         self.encode_layer1 = nn.Sequential(*list(self.mobilenet.features)[:2])
