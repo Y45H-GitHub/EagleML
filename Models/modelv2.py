@@ -7,10 +7,11 @@ from mobile_hair_segmentation_pytorch.models.blocks import LayerDepwiseDecode
 class MobileHairNetV2(nn.Module):
     def __init__(self, decode_block=LayerDepwiseDecode, *args, **kwargs):
         super(MobileHairNetV2, self).__init__()
-        self.mobilenet = mobilenet_v2(*args, **kwargs)
+        self.mobilenet = mobilenet_v2(pretrained=False, *args, **kwargs)
+        self.mobilenet.load_state_dict(torch.load("mobilenet_v2_pretrained.pth"))
         self.decode_block = decode_block
         self.make_layers()
-        self._init_weight()
+        self.__init__weight()
 
     def make_layers(self):
         self.encode_layer1 = nn.Sequential(*list(self.mobilenet.features)[:2])

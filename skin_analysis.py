@@ -126,7 +126,7 @@ def rotate_image(image, angle):
 # --- Hair segmentation on cropped image ---
 def get_hair_mask(image_path, output_path="hair_mask.png"):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    net = MobileHairNetV2(pretrained=True).to(device)
+    net = MobileHairNetV2().to(device)
     image = Image.open(image_path).convert("RGB")
     orig_size = image.size
     image_tensor = TF.to_tensor(image).to(device)
