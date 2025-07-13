@@ -387,6 +387,7 @@ def extract_and_mask_eyes_from_indices(image, landmarks, eye_indices):
 
 
 # Main Process
+@timer
 def process_image(image):
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     img_pil = Image.fromarray(image_rgb)
