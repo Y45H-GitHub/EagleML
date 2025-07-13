@@ -97,15 +97,24 @@ def republish_with_retry(body, props, ch, delivery_tag):
         report_failure(body)
     ch.basic_ack(delivery_tag=delivery_tag)
 
+import time  # Add this at the top of your file if not already present
+
 def callback(ch, method, properties, body):
+    start_time = time.perf_counter()
     try:
         message = orjson.loads(orjson.loads(body))
         sid = message.get("scanSessionId")
         url = message.get("imageUrl")
         print(f"📨 Received scanSessionId={sid}")
 
+        start_time1 = time.perf_counter()
         arr = process_image_from_url(url)
+        end_time1 = time.perf_counter()
+        total_sec1 = end_time1 - start_time1
+        print(f"⏱️ Total cloudinary img time  {sid}: {total_sec1:.3f} seconds")
+
         result = analyze_image_all_regions(arr)
+
 
         glow_map = result.get("glow_index", {})
         glow_vals = [v for v in glow_map.values() if isinstance(v, (int, float))]
@@ -136,6 +145,11 @@ def callback(ch, method, properties, body):
     except Exception as e:
         print(f"❌ Error processing message: {e}")
         republish_with_retry(body, properties, ch, method.delivery_tag)
+    finally:
+        end_time = time.perf_counter()
+        total_sec = end_time - start_time
+        print(f"⏱️ Total time taken for {sid}: {total_sec:.3f} seconds")
+
 
 # --- Start consuming ---
 channel.basic_consume(queue=SCAN_QUEUE, on_message_callback=callback)
