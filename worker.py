@@ -1,6 +1,7 @@
 import os
 print("🔧 Starting worker...")
 
+# --- Load environment variables ---
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -8,6 +9,7 @@ try:
 except Exception as e:
     print("⚠️ Could not load .env:", e)
 
+# --- Import modules ---
 try:
     import pika
     import json
@@ -26,8 +28,8 @@ try:
     SCAN_QUEUE = os.environ.get("SCAN_QUEUE", "scan.queue")
     SCAN_EXCHANGE = os.environ.get("SCAN_EXCHANGE", "scan.exchange")
     SCAN_ROUTING_KEY = os.environ.get("SCAN_ROUTING_KEY", "scan.request")
-    ML_RESULT_ENDPOINT = os.environ["ML_RESULT_ENDPOINT"]  # Required in prod
-    RABBITMQ_URL = os.environ["RABBITMQ_URL"]              # Required in prod
+    ML_RESULT_ENDPOINT = os.environ["ML_RESULT_ENDPOINT"]
+    RABBITMQ_URL = os.environ["RABBITMQ_URL"]
     print("✅ Environment variables loaded")
 except KeyError as e:
     print(f"❌ Missing required environment variable: {e}")
@@ -60,11 +62,12 @@ def process_image_from_url(url):
         print("❌ Failed to download/process image:", e)
         raise
 
-# --- Callback for Incoming Scan Messages ---
+# --- Callback ---
 def callback(ch, method, properties, body):
     try:
         print("📨 Received message:", body)
 
+        # Parse nested JSON (string inside string)
         message = json.loads(json.loads(body))
         scan_session_id = message['scanSessionId']
         image_url = message['imageUrl']
@@ -80,7 +83,7 @@ def callback(ch, method, properties, body):
         glow_values = list(glow_index_map.values())
         overall_glow_index = round(sum(glow_values) / len(glow_values), 2) if glow_values else 0.0
 
-        # Build payload
+        # Prepare payload
         payload = {
             "scanSessionId": scan_session_id,
             "overallGlowIndex": overall_glow_index,
@@ -91,15 +94,20 @@ def callback(ch, method, properties, body):
 
         for metric_type, region_map in analysis_result.items():
             if isinstance(region_map, dict):
-                for region_name, value in region_map.items():
-                    payload["regionMetrics"].append({
-                        "regionName": region_name,
-                        "metricType": metric_type,
-                        "metricValue": float(value)
-                    })
+                for region_item in region_map.items():
+                    try:
+                        region_name, value = region_item
+                        payload["regionMetrics"].append({
+                            "regionName": region_name,
+                            "metricType": metric_type,
+                            "metricValue": float(value)
+                        })
+                    except Exception as e:
+                        print(f"⚠️ Skipping malformed region item in {metric_type}: {region_item} - {e}")
             else:
-                print(f"⚠️ Skipping non-dict metric: {metric_type}")
+                print(f"⚠️ Skipping non-dict metric: {metric_type} = {region_map}")
 
+        # Send to backend
         print("📤 Sending result to backend...")
         response = requests.post(ML_RESULT_ENDPOINT, json=payload)
         print(f"✅ Backend response status: {response.status_code}")
@@ -108,9 +116,9 @@ def callback(ch, method, properties, body):
 
     except Exception as e:
         print("❌ Error processing message:", e)
-        ch.basic_nack(delivery_tag=method.delivery_tag)
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # Avoid infinite retry loop
 
-# --- Start Worker ---
+# --- Start worker ---
 try:
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=SCAN_QUEUE, on_message_callback=callback)
