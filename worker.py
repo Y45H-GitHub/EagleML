@@ -1,4 +1,5 @@
 import os
+import math
 print("🔧 Starting worker...")
 
 # --- Load environment variables ---
@@ -80,30 +81,35 @@ def callback(ch, method, properties, body):
 
         # Compute overall glow index
         glow_index_map = analysis_result.get("glow_index", {})
-        glow_values = list(glow_index_map.values())
+        glow_values = [
+            v for v in glow_index_map.values()
+            if isinstance(v, (int, float)) and not math.isnan(v)
+        ]
         overall_glow_index = round(sum(glow_values) / len(glow_values), 2) if glow_values else 0.0
 
         # Prepare payload
         payload = {
             "scanSessionId": scan_session_id,
             "overallGlowIndex": overall_glow_index,
-            "analysisMetadata": json.dumps(analysis_result),
+            "analysisMetadata": json.dumps(analysis_result, allow_nan=False),
             "regionMetrics": [],
             "visualOutputs": []
         }
 
         for metric_type, region_map in analysis_result.items():
             if isinstance(region_map, dict):
-                for region_item in region_map.items():
+                for region_name, value in region_map.items():
                     try:
-                        region_name, value = region_item
-                        payload["regionMetrics"].append({
-                            "regionName": region_name,
-                            "metricType": metric_type,
-                            "metricValue": float(value)
-                        })
+                        if isinstance(value, (int, float)) and not math.isnan(value) and not math.isinf(value):
+                            payload["regionMetrics"].append({
+                                "regionName": region_name,
+                                "metricType": metric_type,
+                                "metricValue": float(value)
+                            })
+                        else:
+                            print(f"⚠️ Skipping invalid value for {region_name} in {metric_type}: {value}")
                     except Exception as e:
-                        print(f"⚠️ Skipping malformed region item in {metric_type}: {region_item} - {e}")
+                        print(f"⚠️ Failed to process {region_name} in {metric_type}: {e}")
             else:
                 print(f"⚠️ Skipping non-dict metric: {metric_type} = {region_map}")
 
@@ -116,7 +122,7 @@ def callback(ch, method, properties, body):
 
     except Exception as e:
         print("❌ Error processing message:", e)
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # Avoid infinite retry loop
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 # --- Start worker ---
 try:
