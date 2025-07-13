@@ -108,12 +108,12 @@ def callback(ch, method, properties, body):
         print(f"📨 Received scanSessionId={sid}")
 
         start_time1 = time.perf_counter()
-        arr = process_image_from_url(url)
+        arr = process_image_from_url(url) 
         end_time1 = time.perf_counter()
         total_sec1 = end_time1 - start_time1
         print(f"⏱️ Total cloudinary img time  {sid}: {total_sec1:.3f} seconds")
 
-        result = analyze_image_all_regions(arr)
+        result = analyze_image_all_regions(arr) 
 
 
         glow_map = result.get("glow_index", {})
