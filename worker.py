@@ -5,12 +5,12 @@ import requests
 import numpy as np
 from PIL import Image
 from io import BytesIO
-from dotenv import load_dotenv
 
 print("🔧 Starting worker...")
 
 # --- Load environment variables ---
 try:
+    from dotenv import load_dotenv
     load_dotenv()
     print("✅ .env loaded (if local)")
 except Exception as e:
