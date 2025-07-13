@@ -38,14 +38,76 @@ from skimage.morphology import disk
 from skimage.feature import graycomatrix, graycoprops
 from skimage.filters import median
 from skimage import measure
+from collections import defaultdict
 
 
 
-image_path = r"C:\Users\Yash\Desktop\face_app_final\myface.jpg"  # Path to your image
+# image_path = r"C:\Users\Yash\Desktop\face_app_final\myface.jpg"  # Path to your image
 
 ####################################FOREHEAD PATCH#######################################
 # !git clone https://github.com/wonbeomjang/mobile-hair-segmentation-pytorch.git
 # %cd mobile-hair-segmentation-pytorch
+
+# Initialize MediaPipe FaceMesh
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True)
+
+# shrink_ratio
+shrink_ratio_below_eyes = 0.75
+shrink_ratio_side_eyes = 0.75
+shrink_ratio_nose = 1.0
+shrink_ratio_cheeks = 0.75
+shrink_ratio_chin = 0.80
+# shrink_ratio_below_cheek = 0.80
+
+
+# To Balance image
+left_most_landmark  = 130
+right_most_landmark = 359
+
+TARGET_SIZE = 224
+
+# Indices for each
+right_below_eye_indices = [126, 101, 116, 143, 25, 472, 112]
+left_below_eye_indices  = [355, 330, 345, 372, 255, 477, 341]
+
+right_cheek_indices = [120,142,206,207,123,116,117,118,119,111]
+left_cheek_indices  = [349,371,426,427,352,345,346,347,348,340]
+
+RIGHT_EYE_SIDE_INDICES = [27,46,156,118,24]
+LEFT_EYE_SIDE_INDICES  = [257,276,383,347,254]
+RIGHT_EYE_MASK_INDICES = [226, 113, 30, 27, 56, 190, 112, 23, 25]
+LEFT_EYE_MASK_INDICES  = [446, 342, 260, 257, 286, 414, 341, 253, 255]
+
+nose_indices = [4, 420, 399, 351, 122, 174, 198, 279, 49]            #[115, 4, 344, 420, 399, 351, 6,122, 174, 198]
+chin_indices = [83,313,418,262,199,32,194]
+
+# left_below_cheek_indices = [427,287,367,433]
+# right_below_cheek_indices = [207,57,138,213]
+
+# get_angle_function
+def get_rotation_angle(p1, p2):
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    angle = math.degrees(math.atan2(dy, dx))
+    return angle
+
+# return rotated image
+def rotate_image(image, angle):
+    h, w = image.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+
+    M[0, 2] += (new_w / 2) - center[0]
+    M[1, 2] += (new_h / 2) - center[1]
+
+    rotated = cv2.warpAffine(image, M, (new_w, new_h), borderValue=(255, 255, 255))
+    return rotated, M
 
 
 # --- Hair segmentation on cropped image ---
@@ -63,46 +125,10 @@ def get_hair_mask(image_path, output_path="hair_mask.png"):
     save_image(mask.float(), output_path)
     return output_path
 
-
-    
-    # --- Load full image ---
-img_path = r"C:\Users\Yash\Desktop\face_app_final\myface.jpg"  # test image path
-img_cv = cv2.imread(img_path)
-
-if img_cv is None:
-    raise ValueError("Image not found!")
-
-img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-H, W = img_rgb.shape[:2]
-img_pil = Image.fromarray(img_rgb)
-
-# --- Get nose Y using MediaPipe ---
-mp_face_mesh = mp.solutions.face_mesh
-with mp_face_mesh.FaceMesh(static_image_mode=True) as face_mesh:
-    results = face_mesh.process(img_rgb)
-    if not results.multi_face_landmarks:
-        raise ValueError("❌ No face detected.")
-    landmarks = results.multi_face_landmarks[0].landmark
-    nose_y = int(landmarks[1].y * H)
-
-# --- Crop image above nose ---
-img_above_np = img_rgb[:nose_y, :, :]
-img_above = Image.fromarray(img_above_np)
-img_above.save("img_above.png")
-
-# --- Segment hair on upper part only ---
-mask_path = get_hair_mask("img_above.png", "hair_mask_above.png")
-hair_mask = Image.open(mask_path).convert("L")
-hair_mask = hair_mask.point(lambda x: 1 if x > 128 else 0)
-hair_mask_np = np.array(hair_mask)
-
-print(" Test run completed.")
-
-
 # --- Define patch using averaged landmarks ---
 def extract_forehead_patch_above_nose(
     full_img, cropped_above_img, hair_mask_np, landmark_list,
-    idx_left_pair, idx_right_pair, buffer_px=5,
+    idx_left_pair, idx_right_pair, h,nose_y,buffer_px=5,
     min_ratio=0.4, max_attempts=5, shrink_factor=0.2
 ):
     img_width = cropped_above_img.width
@@ -111,14 +137,14 @@ def extract_forehead_patch_above_nose(
     def avg_xy(idx_pair):
         x = (landmark_list[idx_pair[0]].x + landmark_list[idx_pair[1]].x) / 2
         y = (landmark_list[idx_pair[0]].y + landmark_list[idx_pair[1]].y) / 2
-        return int(x * img_width), int(y * H)
+        return int(x * img_width), int(y * h)
 
     x1, y1 = avg_xy(idx_left_pair)
     x2, y2 = avg_xy(idx_right_pair)
 
     x_left_orig = min(x1, x2)
     x_right_orig = max(x1, x2)
-    y_bottom = min(y1, y2, nose_y)
+    y_bottom = min(y1, y2)
     y_bottom = min(y_bottom, img_height)
 
     # --- Step 1: Initial patch_top ---
@@ -159,7 +185,7 @@ def extract_forehead_patch_above_nose(
 
         patch_top = compute_patch_top(x_left, x_right)
         attempt += 1
-        print(f" Reduced width attempt {attempt} | New aspect ratio: {aspect_ratio:.2f}")
+        print(f"⚠ Reduced width attempt {attempt} | New aspect ratio: {aspect_ratio:.2f}")
 
         # --- Step 3: Extend width left and right within landmark bounds (only if hair is not inside box) ---
     while x_left > x_left_orig:
@@ -187,82 +213,6 @@ def extract_forehead_patch_above_nose(
     # Final crop
     patch = cropped_above_img.crop((x_left, patch_top, x_right, y_bottom))
     return patch, (x_left, patch_top, x_right, y_bottom)
-
-
-# --- Landmark pairs for patch corners ---
-idx_left_pair = (104, 105)
-idx_right_pair = (333, 334)
-
-# --- Extract forehead patch ---
-forehead_patch, coords = extract_forehead_patch_above_nose(
-    full_img="myface.jpg",
-    cropped_above_img=img_above,
-    hair_mask_np=hair_mask_np,
-    landmark_list=landmarks,
-    idx_left_pair=idx_left_pair,
-    idx_right_pair=idx_right_pair,
-    buffer_px=5,
-    min_ratio=0.3
-)
-
-#####################################ALL PATCHES##################################
-# Initialize MediaPipe FaceMesh
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True)
-
-# shrink_ratio
-shrink_ratio_below_eyes = 0.75
-shrink_ratio_side_eyes = 0.75
-shrink_ratio_nose = 0.80
-shrink_ratio_cheeks = 0.75
-shrink_ratio_chin = 0.80
-
-# To Balance image
-left_most_landmark  = 130
-right_most_landmark = 359
-
-TARGET_SIZE = 224
-
-# Indices for each
-right_below_eye_indices = [126, 101, 116, 143, 25, 472, 112]
-left_below_eye_indices  = [355, 330, 345, 372, 255, 477, 341]
-
-right_cheek_indices = [120,142,206,207,123,116,117,118,119,111]
-left_cheek_indices  = [349,371,426,427,352,345,346,347,348,340]
-
-RIGHT_EYE_SIDE_INDICES = [27,46,156,118,24]
-LEFT_EYE_SIDE_INDICES  = [257,276,383,347,254]
-RIGHT_EYE_MASK_INDICES = [226, 113, 30, 27, 56, 190, 112, 23, 25]
-LEFT_EYE_MASK_INDICES  = [446, 342, 260, 257, 286, 414, 341, 253, 255]
-
-nose_indices = [115, 4, 344, 420, 399, 351, 122, 174, 198]
-chin_indices = [83,313,418,262,199,32,194]
-
-
-
-# get_angle_function
-def get_rotation_angle(p1, p2):
-    dx = p2[0] - p1[0]
-    dy = p2[1] - p1[1]
-    angle = math.degrees(math.atan2(dy, dx))
-    return angle
-
-# return rotated image
-def rotate_image(image, angle):
-    h, w = image.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-    new_w = int((h * sin) + (w * cos))
-    new_h = int((h * cos) + (w * sin))
-
-    M[0, 2] += (new_w / 2) - center[0]
-    M[1, 2] += (new_h / 2) - center[1]
-
-    rotated = cv2.warpAffine(image, M, (new_w, new_h), borderValue=(255, 255, 255))
-    return rotated
 
 # extract patches for all except side_eye
 def extract_patch(image, landmark_points, shrink_ratio=0.8):
@@ -391,16 +341,46 @@ def extract_patch_side_eye(image, landmark_points, eye_mask_points=None, shrink_
     return patch
 
 
+####Extract patch for eye-side eye wrinkles
+def extract_and_mask_eyes_from_indices(image, landmarks, eye_indices):
+    """
+    Extracts and masks eye regions using landmark indices.
+    Returns both the eye images (with magenta fill) and the binary masks.
+    """
+    def process_eye(outer_ids, inner_ids):
+        outer_pts = np.array([landmarks[i] for i in outer_ids], dtype=np.int32)
+        inner_pts = np.array([landmarks[i] for i in inner_ids], dtype=np.int32)
+
+        x, y, w, h = cv2.boundingRect(outer_pts)
+        eye_roi = image[y:y+h, x:x+w].copy()
+
+        # Offset landmarks for ROI
+        inner_offset = inner_pts - [x, y]
+
+        # Create mask for inner eye region
+        mask = np.ones((h, w), dtype=np.uint8) * 255
+        cv2.fillPoly(mask, [inner_offset], 0)
+
+        # Fill inner region with magenta in the eye image
+        eye_roi[mask == 0] = [255, 0, 255]  # Magenta in BGR
+
+        return eye_roi, mask
+
+    left_eye_img, left_eye_mask = process_eye(eye_indices["left_eye_outer"], eye_indices["left_eye_inner"])
+    right_eye_img, right_eye_mask = process_eye(eye_indices["right_eye_outer"], eye_indices["right_eye_inner"])
+
+    return (left_eye_img, left_eye_mask), (right_eye_img, right_eye_mask)
+
+
 
 # Main Process
 def process_image(image):
-    if image is None:
-        raise ValueError("Image is empty or could not be loaded.")
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    img_pil = Image.fromarray(image_rgb)
     results = face_mesh.process(image_rgb)
 
     if not results.multi_face_landmarks:
-        print(" Face not detected in input image")
+        print("❌ Face not detected in input image")
         return {}
 
     landmarks = results.multi_face_landmarks[0].landmark
@@ -411,16 +391,72 @@ def process_image(image):
 
     # Rotate image
     angle = get_rotation_angle(pt1, pt2)
-    rotated_image = rotate_image(image, angle)
+    rotated_image,M = rotate_image(image, angle)
 
     # Detect landmarks on rotated image
     rotated_rgb = cv2.cvtColor(rotated_image, cv2.COLOR_BGR2RGB)
+    rotated_img_pil = Image.fromarray(rotated_rgb)
     rotated_results = face_mesh.process(rotated_rgb)
     if not rotated_results.multi_face_landmarks:
-        print(" Face not detected after rotation")
+        print("❌ Face not detected after rotation")
         return {}
 
     rotated_landmarks = rotated_results.multi_face_landmarks[0].landmark
+
+
+##############Left & Right Eye###################
+    # ---- Eye masks (with magenta fill) ----
+    eye_indices = {
+        "left_eye_outer": [257, 445, 383, 372, 347, 349, 453, 413, 286],
+        "left_eye_inner": [463, 414, 286, 257, 260, 359, 255, 253, 341],
+        "right_eye_outer": [223, 222, 189, 233, 120, 117, 143, 225],
+        "right_eye_inner": [226, 30, 27, 28, 56, 243, 23, 110]
+    }
+
+    # Get landmark coords as (x, y) for current image
+    h_rot, w_rot, _ = rotated_image.shape
+    landmark_xy = [(int(pt.x * w_rot), int(pt.y * h_rot)) for pt in rotated_landmarks]
+
+    (left_eye_img, left_eye_mask), (right_eye_img, right_eye_mask) = extract_and_mask_eyes_from_indices(
+        rotated_image, landmark_xy, eye_indices
+    )
+
+
+
+##############forehead landmarks##################
+    rh, rw, _ = rotated_rgb.shape
+    nose_y = int(rotated_landmarks[9].y * rh)
+
+    # --- Crop image above nose ---
+    img_above_np = rotated_rgb[:nose_y, :, :]
+    img_above = Image.fromarray(img_above_np)
+    img_above.save("img_above.png")
+
+    # --- Segment hair on upper part only ---
+    mask_path = get_hair_mask("img_above.png", "hair_mask_above.png")
+    hair_mask = Image.open(mask_path).convert("L")
+    hair_mask = hair_mask.point(lambda x: 1 if x > 128 else 0)
+    hair_mask_np = np.array(hair_mask)
+
+
+    # --- Landmark pairs for patch corners ---
+    idx_left_pair = (104, 105)
+    idx_right_pair = (333, 334)
+
+    # --- Extract forehead patch ---
+    forehead_patch, coords = extract_forehead_patch_above_nose(
+        full_img=rotated_img_pil,
+        cropped_above_img=img_above,
+        hair_mask_np=hair_mask_np,
+        landmark_list=rotated_landmarks,
+        idx_left_pair=idx_left_pair,
+        idx_right_pair=idx_right_pair,
+        buffer_px=5,
+        min_ratio=0.3,
+        h=rotated_rgb.shape[0],  # or simply h if already defined
+        nose_y=nose_y
+    )
+
 
     # Extract cheek patches
     right_cheek = extract_patch(rotated_image, [rotated_landmarks[i] for i in right_cheek_indices], shrink_ratio_cheeks)
@@ -432,12 +468,15 @@ def process_image(image):
     nose = extract_patch(rotated_image, [rotated_landmarks[i] for i in nose_indices], shrink_ratio_nose)
     chin = extract_patch(rotated_image, [rotated_landmarks[i] for i in chin_indices], shrink_ratio_chin)
 
-    right_side_eye = extract_patch_side_eye(rotated_image, [landmarks[i] for i in RIGHT_EYE_SIDE_INDICES],
-                    eye_mask_points=[landmarks[i] for i in RIGHT_EYE_MASK_INDICES], shrink_ratio=shrink_ratio_side_eyes)
+    # right_side_eye = extract_patch_side_eye(rotated_image, [landmarks[i] for i in RIGHT_EYE_SIDE_INDICES],
+    #                 eye_mask_points=[landmarks[i] for i in RIGHT_EYE_MASK_INDICES], shrink_ratio=shrink_ratio_side_eyes)
 
-    left_side_eye  = extract_patch_side_eye(rotated_image, [landmarks[i] for i in LEFT_EYE_SIDE_INDICES],
-                    eye_mask_points=[landmarks[i] for i in LEFT_EYE_MASK_INDICES], shrink_ratio=shrink_ratio_side_eyes)
+    # left_side_eye  = extract_patch_side_eye(rotated_image, [landmarks[i] for i in LEFT_EYE_SIDE_INDICES],
+    #                 eye_mask_points=[landmarks[i] for i in LEFT_EYE_MASK_INDICES], shrink_ratio=shrink_ratio_side_eyes)
 
+
+    # right_below_cheek = extract_patch(rotated_image, [rotated_landmarks[i] for i in right_below_cheek_indices], shrink_ratio_below_cheek)
+    # left_below_cheek  = extract_patch(rotated_image, [rotated_landmarks[i] for i in left_below_cheek_indices], shrink_ratio_below_cheek)
 
 
     # Convert to RGB
@@ -447,8 +486,12 @@ def process_image(image):
     left_below_eye_rgb = cv2.cvtColor(left_below_eye, cv2.COLOR_BGR2RGB)
     nose_rgb = cv2.cvtColor(nose, cv2.COLOR_BGR2RGB)
     chin_rgb = cv2.cvtColor(chin, cv2.COLOR_BGR2RGB)
-    right_side_eye_rgb = cv2.cvtColor(right_side_eye, cv2.COLOR_BGR2RGB)
-    left_side_eye_rgb = cv2.cvtColor(left_side_eye, cv2.COLOR_BGR2RGB)
+    # right_side_eye_rgb = cv2.cvtColor(right_side_eye, cv2.COLOR_BGR2RGB)
+    # left_side_eye_rgb = cv2.cvtColor(left_side_eye, cv2.COLOR_BGR2RGB)
+    left_eye_rgb = cv2.cvtColor(left_eye_img, cv2.COLOR_BGR2RGB)
+    right_eye_rgb = cv2.cvtColor(right_eye_img, cv2.COLOR_BGR2RGB)
+    # right_below_cheek_rgb = cv2.cvtColor(right_below_cheek, cv2.COLOR_BGR2RGB)
+    # left_below_cheek_rgb = cv2.cvtColor(left_below_cheek, cv2.COLOR_BGR2RGB)
 
     forehead_rgb = np.array(forehead_patch)  # Convert PIL to NumPy RGB
 
@@ -459,18 +502,25 @@ def process_image(image):
         'left_below_eye': left_below_eye_rgb,
         'nose': nose_rgb,
         'chin': chin_rgb,
-        'right_side_eye': right_side_eye_rgb,
-        'left_side_eye': left_side_eye_rgb,
-        'forehead': forehead_rgb
+        # 'right_side_eye': right_side_eye_rgb,
+        # 'left_side_eye': left_side_eye_rgb,
+        'forehead': forehead_rgb,
+        'forehead_coords': coords,
+        'rotation_matrix': M, # <--- return M too
+
+        'left_eye': (left_eye_rgb, left_eye_mask),
+        'right_eye': (right_eye_rgb, right_eye_mask),
     }
 
 
-image_bgr = cv2.imread(image_path)
-patches = process_image(image_bgr)
+# image_bgr = cv2.imread(image_path)
+# patches = process_image(image_bgr)
 
-# print(patches['right_below_eye'].shape)
-plt.imshow(patches['forehead'])
-plt.axis('off')
+# # print(patches['right_below_eye'].shape)
+# plt.imshow(patches['forehead'])
+# plt.axis('off')
+
+
 
 
 ##################HIDDEN DARKSPOTS############################
@@ -526,24 +576,41 @@ def enhance_dry_patch_single(image_path):
 # image_path = "/content/myface3.jpg"
 
 # Get enhanced image (RGB)
-enhanced_rgb = enhance_dry_patch_single(image_path)
+# enhanced_rgb = enhance_dry_patch_single(image_path)
 
 
 
 
 ################Dark Circle###################
 # --- Score Mapping ---
-def convert_to_score_10(score):
-    if score >= 85: return 10
-    elif score >= 75: return 9
-    elif score >= 65: return 8
-    elif score >= 60: return 7
-    elif score >= 55: return 6
-    elif score >= 50: return 5
-    elif score >= 45: return 4
-    elif score >= 35: return 3
-    elif score >= 25: return 2
-    else: return 1
+# def convert_to_score_10(score):
+#     if score >= 85: return 10
+#     elif score >= 75: return 9
+#     elif score >= 65: return 8
+#     elif score >= 60: return 7
+#     elif score >= 55: return 6
+#     elif score >= 50: return 5
+#     elif score >= 45: return 4
+#     elif score >= 35: return 3
+#     elif score >= 25: return 2
+#     else: return 1
+
+def compress_score_dc(value):
+    # if value <= 22:
+    #     return 1
+    # elif value >= 86:
+    #     return 9
+
+    # Linear scaling from range 22–86 → 1–9
+    scaled = 1 + (value - 22) * (8 / (86 - 22))
+    if scaled > 9.5:
+        return 9.5
+    if scaled < 1:
+      return 1
+
+    return round(scaled, 2)
+
+
 
 # --- KDE Threshold Helper ---
 def adaptive_kde_threshold(channel_data, fraction=0.10):
@@ -558,7 +625,7 @@ def adaptive_kde_threshold(channel_data, fraction=0.10):
     return x[idx]
 
 # --- Main Function ---
-def compute_image_score(img_rgb):
+def compute_darkcircle_score(img_rgb):
     img_np = np.array(img_rgb)
     H, W = img_np.shape[:2]
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
@@ -591,7 +658,12 @@ def compute_image_score(img_rgb):
     v_vals = np.linspace(0, 255, 256)
     kde_vals = kde(v_vals)
     diffs = np.diff(kde_vals)
-    valleys = np.where((np.hstack(([False], diffs[:-1] < 0)) & (np.hstack((diffs[1:] > 0, [False]))))[0])
+    if diffs.ndim == 0 or diffs.size < 2:
+        valleys = []
+    else:
+        # valleys = np.where((np.hstack(([False], diffs[:-1] < 0)) & (np.hstack((diffs[1:] > 0, [False]))))[0])
+        condition = (np.hstack(([False], diffs[:-1] < 0)) & np.hstack((diffs[1:] > 0, [False])))
+        valleys = np.where(condition)[0]
     if len(valleys) >= 2:
         v_thresh1 = int(v_vals[valleys[0]])
         v_thresh2 = int(v_vals[valleys[1]])
@@ -635,29 +707,27 @@ def compute_image_score(img_rgb):
         0.1 * (vessel_score / 0.6)
     ) * (((high_area + moderate_area)/(high_area + moderate_area + low_area)))*(darkness_severity)*(10/9)
 
-    score_10 = convert_to_score_10(final_score)
+    score_10 = compress_score_dc(final_score)
 
-    return score_10
+    return score_10    ### have to chnage
+
 
 
 # Provide path to your local image (e.g., in Colab or locally)
 
 # Extract left and right below-eye patches
-selected_regions = ['left_below_eye', 'right_below_eye']
-darkcircle_scores = {}
+# selected_regions = ['left_below_eye', 'right_below_eye']
+# darkcircle_scores = {}
 
-for region in selected_regions:
-    if region in patches:
-        score = compute_image_score(patches[region])
-        darkcircle_scores[region] = score
-    else:
-        print(f"Warning: {region} patch not found in patches dictionary.")
+# for region in selected_regions:
+#     if region in patches:
+#         score = compute_darkcircle_score(patches[region])
+#         darkcircle_scores[region] = score
+#     else:
+#         print(f"Warning: {region} patch not found in patches dictionary.")
 
 
 ##########################DARK SPOTS##############################
-import cv2
-import numpy as np
-
 def compute_darkspot_score(img):
     intervals = {
         'bound': {'min': 100, 'max': 255},
@@ -710,17 +780,27 @@ def compute_darkspot_score(img):
         thresholds = np.histogram_bin_edges(areas, bins=bins)
         return [c for c in contours if cv2.contourArea(c) > thresholds[1]]
 
-    def map_score_to_10(score):
-        if score >= 0.27: return 10
-        elif score >= 0.24: return 9
-        elif score >= 0.21: return 8
-        elif score >= 0.18: return 7
-        elif score >= 0.15: return 6
-        elif score >= 0.12: return 5
-        elif score >= 0.10: return 4
-        elif score >= 0.08: return 3
-        elif score >= 0.06: return 2
-        else: return 1
+    # def map_score_to_10(score):
+    #     if score >= 0.27: return 10
+    #     elif score >= 0.24: return 9
+    #     elif score >= 0.21: return 8
+    #     elif score >= 0.18: return 7
+    #     elif score >= 0.15: return 6
+    #     elif score >= 0.12: return 5
+    #     elif score >= 0.10: return 4
+    #     elif score >= 0.08: return 3
+    #     elif score >= 0.06: return 2
+    #     else: return 1
+
+    def compress_score_ds(value):
+      scaled = 1 + (value - 0.1558) * (8 / (0.3894 - 0.1558))
+      if scaled > 9.5:
+        return 9.5
+      if scaled < 1:
+        return 1
+
+      return round(scaled, 2)
+
 
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
@@ -817,7 +897,7 @@ def compute_darkspot_score(img):
             v_ratios.append((c, ratio))
 
     if not v_ratios:
-        return 0.0, img_bgr  # No lesions, return clean image
+        return 0.0, 1, img_bgr  # No lesions, return clean image
 
     ratios_only = [r for _, r in v_ratios]
     bin_edges = np.histogram_bin_edges(ratios_only, bins=5)
@@ -833,23 +913,32 @@ def compute_darkspot_score(img):
         weighted_sum += (1 / ratio) * cv2.contourArea(c)
 
     severity_score = weighted_sum / total_area
-    severity_score_10 = map_score_to_10(severity_score)
+    severity_score_final = compress_score_ds(severity_score)
 
-    return severity_score_10, colored_output
+    return severity_score_final, colored_output
 
 
-selected_regions = ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']
-darkspots_scores = {}
+# selected_regions = ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']
+# darkspots_scores = {}
 
-for region in selected_regions:
-    if region in patches:
-        score, _ = compute_darkspot_score(patches[region])
-        darkspots_scores[region] = score
-    else:
-        print(f"Warning: {region} patch not found in patches dictionary.")
+# for region in selected_regions:
+#     if region in patches:
+#         score, _ = compute_darkspot_score(patches[region])
+#         darkspots_scores[region] = score
+#     else:
+#         print(f"Warning: {region} patch not found in patches dictionary.")
 
 
 ######################################OILINESS#########################################
+
+def compress_score_oil(value):
+      scaled = 1 + (value - 0) * (8 / (0.3 - 0))
+      if scaled > 9.5:
+        return 9.5
+      if scaled < 1:
+        return 1
+
+      return round(scaled, 2)
 
 def get_kmeans_thresh(data, high=True):
     kmeans = KMeans(n_clusters=2, random_state=0).fit(data)
@@ -910,10 +999,18 @@ def compute_oiliness_score(img_rgb):
     brightest_idx = np.argmax(np.sum(centers, axis=1))
     bright_mask = ((labels_full == brightest_idx) & valid_mask).astype(np.uint8) * 255
 
-    # --- Combined Overlay ---
+    # --- Yellow + Green Overlays ---
+    overlay_oil = img_rgb.copy()
+    overlay_oil[(oil_mask == 255) & valid_mask] = [255, 255, 0]
+    blended_oil = cv2.addWeighted(img_rgb, 0.7, overlay_oil, 0.3, 0)
+
+    overlay_bright = img_rgb.copy()
+    overlay_bright[(bright_mask == 255) & valid_mask] = [0, 255, 0]
+    blended_bright = cv2.addWeighted(img_rgb, 0.7, overlay_bright, 0.3, 0)
+
     combined = img_rgb.copy()
-    combined[(bright_mask == 255) & valid_mask] = [0, 255, 0]      # Green = bright
-    combined[(oil_mask == 255) & valid_mask] = [255, 255, 0]       # Yellow = oily
+    combined[(bright_mask == 255) & valid_mask] = [0, 255, 0]
+    combined[(oil_mask == 255) & valid_mask] = [255, 255, 0]
     blended_combined = cv2.addWeighted(img_rgb, 0.6, combined, 0.4, 0)
 
     # --- Scores ---
@@ -935,46 +1032,46 @@ def compute_oiliness_score(img_rgb):
     else:
         final_score = (overlap_ratio ** 0.75) * (jaccard_ratio ** 0.5)
 
-    # --- Final Score Out of 10 ---
-    if final_score >= 0.24:
-        score_out_of_10 = 10
-    elif final_score >= 0.21:
-        score_out_of_10 = 9
-    elif final_score >= 0.18:
-        score_out_of_10 = 8
-    elif final_score >= 0.15:
-        score_out_of_10 = 7
-    elif final_score >= 0.12:
-        score_out_of_10 = 6
-    elif final_score >= 0.10:
-        score_out_of_10 = 5
-    elif final_score >= 0.08:
-        score_out_of_10 = 4
-    elif final_score >= 0.06:
-        score_out_of_10 = 3
-    elif final_score >= 0.04:
-        score_out_of_10 = 2
-    else:
-        score_out_of_10 = 1
+    # --- Final Score Out of 10 ---    0.24,0.21,0.18,0.15,0.12,0.10,0.08,0.06,0.04
+    # if final_score >= 0.30:
+    #     score_out_of_10 = 10
+    # elif final_score >= 0.25:
+    #     score_out_of_10 = 9
+    # elif final_score >= 0.21:
+    #     score_out_of_10 = 8
+    # elif final_score >= 0.18:
+    #     score_out_of_10 = 7
+    # elif final_score >= 0.15:
+    #     score_out_of_10 = 6
+    # elif final_score >= 0.13:
+    #     score_out_of_10 = 5
+    # elif final_score >= 0.11:
+    #     score_out_of_10 = 4
+    # elif final_score >= 0.08:
+    #     score_out_of_10 = 3
+    # elif final_score >= 0.05:
+    #     score_out_of_10 = 2
+    # else:
+    #     score_out_of_10 = 1
 
-    return score_out_of_10, blended_combined
+    return compress_score_oil(final_score), blended_oil
 
-selected_regions = ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']
-oiliness_scores = {}
+# selected_regions = ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']
+# oiliness_scores = {}
 
-for region in selected_regions:
-    if region in patches:
-        score, _ = compute_oiliness_score(patches[region])
-        oiliness_scores[region] = score
-    else:
-        print(f"Warning: {region} patch not found in patches dictionary.")
+# for region in selected_regions:
+#     if region in patches:
+#         score, _ = compute_oiliness_score(patches[region])
+#         oiliness_scores[region] = score
+#     else:
+#         print(f"Warning: {region} patch not found in patches dictionary.")
 
 
 
 
 ###############################WRINKLES#########################################
 
-def wrinkle_overlay_single(rgb_image, color=(255, 0, 0)):
+def wrinkle_mask_overlay(rgb_image, color=(255, 0, 0)):
     """
     Applies CLAHE + Frangi + Skeletonize on a single RGB image and returns wrinkle overlay.
 
@@ -987,7 +1084,7 @@ def wrinkle_overlay_single(rgb_image, color=(255, 0, 0)):
         wrinkle_mask (np.ndarray): Binary mask of final wrinkle skeleton.
     """
     gray = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2GRAY)
-    gray = cv2.GaussianBlur(gray, (7,7), sigmaX=2.0)
+    # gray = cv2.GaussianBlur(gray, (7, 7), sigmaX=2.0)
 
     # Predefined best CLAHE + Frangi settings
     clahe_settings = [(8.0, (16, 16)), (10.0, (16, 16)), (12.0, (16, 16)), (14.0, (16, 16))]
@@ -1020,25 +1117,38 @@ def wrinkle_overlay_single(rgb_image, color=(255, 0, 0)):
 
     return overlay, clean_mask
 
-# Run wrinkle overlay
-selected_regions = [ 'forehead','left_side_eye', 'right_side_eye']
-wrinkle_scores = {}
-wrinkle_overlays = {}
-for region in selected_regions:
-    if region in patches:
-        overlay_img, wrinkle_mask = wrinkle_overlay_single(patches[region])
-        raw_score = np.sum(wrinkle_mask > 0) / wrinkle_mask.size
-        score = round(min(raw_score / 0.02, 1.0) * 10)
-        wrinkle_scores[region] = score
-        wrinkle_overlays[region] = overlay_img
-    else:
-        print(f"Warning: {region} patch not found in patches dictionary.")
+def compute_wrinkle_score(wrinkle_mask, mask):    ## modify this function
+  # Only consider pixels where mask is white (255)
+  valid_region = (mask == 255)
+
+  # Avoid division by zero if no valid pixels
+  if np.count_nonzero(valid_region) == 0:
+      return 0
+
+  # Calculate wrinkle presence within valid region
+  raw_score = np.sum((wrinkle_mask > 0) & valid_region) / np.count_nonzero(valid_region)
+  score = round(min(raw_score / 0.02, 1.0) * 10,2)
+  return score
+
+# # Run wrinkle overlay
+# selected_regions = [ 'forehead','left_side_eye', 'right_side_eye']
+# wrinkle_scores = {}
+# wrinkle_overlays = {}
+# for region in selected_regions:
+#     if region in patches:
+#         overlay_img, wrinkle_mask = wrinkle_overlay_single(patches[region])
+#         raw_score = np.sum(wrinkle_mask > 0) / wrinkle_mask.size
+#         score = round(min(raw_score / 0.02, 1.0) * 10)
+#         wrinkle_scores[region] = score
+#         wrinkle_overlays[region] = overlay_img
+#     else:
+#         print(f"Warning: {region} patch not found in patches dictionary.")
 
 
 
 #######################GLOW INDEX##################################
 
-def compute_evenness_smoothness_score(img_rgb):
+def compute_glowindex_score(img_rgb):
     def compute_evenness_map(image, cluster_size=20):
         h, w = image.shape[:2]
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -1144,15 +1254,15 @@ def compute_evenness_smoothness_score(img_rgb):
 
     final_score = round((evenness_score + smoothness_score) / 2, 2)
 
-    return evenness_score, smoothness_score, final_score
+    return final_score
 
-glowindex_scores = {}
+# glowindex_scores = {}
 
-for name, img_rgb in patches.items():
-    even, smooth, final = compute_evenness_smoothness_score(img_rgb)
-    glowindex_scores[name] = {
-        'glow_index_score': final
-    }
+# for name, img_rgb in patches.items():
+#     even, smooth, final = compute_evenness_smoothness_score(img_rgb)
+#     glowindex_scores[name] = {
+#         'glow_index_score': final
+#     }
 
 
 
@@ -1164,34 +1274,48 @@ def texture(image_bgr):
     l_channel = lab[:, :, 0]
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(l_channel)
-    blur1 = cv2.GaussianBlur(enhanced, (3, 3), 0)
-    blur2 = cv2.GaussianBlur(enhanced, (9, 9), 0)
+    blur1 = cv2.GaussianBlur(enhanced, (5, 5), 0)
+    blur2 = cv2.GaussianBlur(enhanced, (15, 15), 0)
     dog = cv2.subtract(blur1, blur2)
-    flake_mask = dog > 25
-    flake_ratio = np.sum(flake_mask) * 1000 / dog.size * 100 / 1.5 * 10
+    adaptive_thresh = cv2.adaptiveThreshold(
+        dog, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        blockSize=11,
+        C=4
+    )
+    adaptive_thresh_inv = cv2.bitwise_not(adaptive_thresh)
+    contours, _ = cv2.findContours(adaptive_thresh_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    if flake_ratio <= 1:
+    # Compute total area covered by contours
+    total_contour_area = sum(cv2.contourArea(cnt) for cnt in contours)
+    patch_area = image_bgr.shape[0] * image_bgr.shape[1]
+
+    # Final score
+    contour_score = total_contour_area / patch_area
+
+    if contour_score <= 1:
         score = 1
-    elif flake_ratio <= 2:
+    elif contour_score <= 2:
         score = 2
-    elif flake_ratio <= 3:
+    elif contour_score <= 3:
         score = 3
-    elif flake_ratio <= 4:
+    elif contour_score <= 4:
         score = 4
-    elif flake_ratio <= 5:
+    elif contour_score <= 5:
         score = 5
-    elif flake_ratio <= 6:
+    elif contour_score <= 6:
         score = 6
-    elif flake_ratio <= 7:
+    elif contour_score <= 7:
         score = 7
-    elif flake_ratio <= 8:
+    elif contour_score <= 8:
         score = 8
-    elif flake_ratio <= 9:
+    elif contour_score <= 9:
         score = 9
     else:
         score = 10
 
-    return score, flake_ratio
+    return score, contour_score
 
 # --- Roughness score ---
 def compute_glcm_roughness(image_bgr):
@@ -1227,77 +1351,182 @@ def compute_glcm_roughness(image_bgr):
     return score
 
 # --- Wrapper Function ---
-def compute_flake_texture_roughness_score(image_rgb):
+def compute_dryness_score(image_rgb):
     image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-    texture_score, flake_ratio = texture(image_bgr)
+    texture_score, contour_score = texture(image_bgr)
     roughness_score = compute_glcm_roughness(image_bgr)
     final_score = round((texture_score + roughness_score) / 2)
 
     return final_score
 
-dryness_scores = {}
+# dryness_scores = {}
 
-for name, img_rgb in patches.items():
-    final = compute_flake_texture_roughness_score(img_rgb)
-    dryness_scores[name] = {
-        'dryness_score': final
-    }
+# for name, img_rgb in patches.items():
+#     final = compute_flake_texture_roughness_score(img_rgb)
+#     dryness_scores[name] = {
+#         'dryness_score': final
+#     }
 # NOTE: Due to message size limitations, the full code is too long for a single snippet.
 # We'll break it down in the following steps and update this module section by section.
 
 # === Master Entry Function ===
+# def analyze_image_all_regions(image_np):
+#     image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+#     patches = process_image(image_bgr)
+#     results = {}
+
+#     dc_scores = {}
+#     for region in ['left_below_eye', 'right_below_eye']:
+#         if region in patches:
+#             dc_scores[region] = compute_darkcircle_score(patches[region])
+#     results['dark_circles'] = dc_scores
+
+#     ds_scores = {}
+#     for region in ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']:
+#         if region in patches:
+#             score, _ = compute_darkspot_score(patches[region])
+#             ds_scores[region] = score
+#     results['dark_spots'] = ds_scores
+
+#     oil_scores = {}
+#     for region in ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']:
+#         if region in patches:
+#             score, _ = compute_oiliness_score(patches[region])
+#             oil_scores[region] = score
+#     results['oiliness'] = oil_scores
+
+#     wrinkle_scores = {}
+#     for region in ['forehead', 'left_side_eye', 'right_side_eye']:
+#         if region in patches:
+#             _, mask = wrinkle_overlay_single(patches[region])
+#             raw_score = np.sum(mask > 0) / mask.size
+#             wrinkle_scores[region] = round(min(raw_score / 0.02, 1.0) * 10)
+#     results['wrinkles'] = wrinkle_scores
+
+#     glow_scores = {}
+#     for name, img in patches.items():
+#         even, smooth, final = compute_evenness_smoothness_score(img)
+#         glow_scores[name] = final
+#     results['glow_index'] = glow_scores
+
+#     dryness_scores = {}
+#     for name, img in patches.items():
+#         dryness_scores[name] = compute_flake_texture_roughness_score(img)
+#     results['dryness'] = dryness_scores
+
+    
+#     # return results
+#         # Print all results clearly
+#     print("\n--- Final Region-wise Scores ---", flush=True)
+#     for category, region_scores in results.items():
+#         print(f"\n{category.upper()}:", flush=True)
+#     for region, score in region_scores.items():
+#         print(f"  {region}: {score}", flush=True)
+
+
+#     return results
 def analyze_image_all_regions(image_np):
+
     image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
     patches = process_image(image_bgr)
     results = {}
 
-    dc_scores = {}
+    # Create containers to hold condition scores
+    all_condition_scores = defaultdict(dict)
+
+    # Dark Circle
     for region in ['left_below_eye', 'right_below_eye']:
-        if region in patches:
-            dc_scores[region] = compute_image_score(patches[region])
-    results['dark_circles'] = dc_scores
+            score = compute_darkcircle_score(patches[region])
+            all_condition_scores['dark_circle_score'][region] = score
 
-    ds_scores = {}
+    # Dark Spot
     for region in ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']:
-        if region in patches:
             score, _ = compute_darkspot_score(patches[region])
-            ds_scores[region] = score
-    results['dark_spots'] = ds_scores
+            all_condition_scores['darkspot_score'][region] = score
 
-    oil_scores = {}
+    # Oiliness
     for region in ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']:
-        if region in patches:
             score, _ = compute_oiliness_score(patches[region])
-            oil_scores[region] = score
-    results['oiliness'] = oil_scores
+            all_condition_scores['oiliness_score'][region] = score
 
-    wrinkle_scores = {}
-    for region in ['forehead', 'left_side_eye', 'right_side_eye']:
+    # Enforce symmetry for oiliness
+    if 'left_cheek' in all_condition_scores['oiliness_score'] and 'right_cheek' in all_condition_scores['oiliness_score']:
+        l = all_condition_scores['oiliness_score']['left_cheek']
+        r = all_condition_scores['oiliness_score']['right_cheek']
+        avg = round((l + r) / 2, 2)
+        all_condition_scores['oiliness_score']['left_cheek'] = avg
+        all_condition_scores['oiliness_score']['right_cheek'] = avg
+
+    # Wrinkles
+    for region in ['forehead', 'left_eye', 'right_eye']:
+        patch = patches[region]
+
+        if region in ['left_eye', 'right_eye']:
+            img, mask = patch  # Unpack (image, mask)
+            _, wrinkle_mask = wrinkle_mask_overlay(img)
+            score = compute_wrinkle_score(wrinkle_mask, mask)
+        else:
+            # Forehead: patch is just the image
+            _, wrinkle_mask = wrinkle_mask_overlay(patch)
+            raw_ratio = np.sum(wrinkle_mask > 0) / wrinkle_mask.size
+            score = round(min(raw_ratio / 0.02, 1.0) * 10)
+
+        all_condition_scores['wrinkle_score'][region] = score
+
+
+
+    for region in ['left_cheek', 'right_cheek', 'nose', 'chin', 'forehead', 'left_below_eye', 'right_below_eye']:
         if region in patches:
-            _, mask = wrinkle_overlay_single(patches[region])
-            raw_score = np.sum(mask > 0) / mask.size
-            wrinkle_scores[region] = round(min(raw_score / 0.02, 1.0) * 10)
-    results['wrinkles'] = wrinkle_scores
+            all_condition_scores['dryness_score'][region] = int(compute_dryness_score(patches[region]))
 
-    glow_scores = {}
-    for name, img in patches.items():
-        even, smooth, final = compute_evenness_smoothness_score(img)
-        glow_scores[name] = final
-    results['glow_index'] = glow_scores
+    for region in ['left_cheek', 'right_cheek', 'nose', 'chin', 'forehead', 'left_below_eye', 'right_below_eye']:
+        if region in patches:
+            all_condition_scores['glow_index_score'][region] = int(compute_glowindex_score(patches[region]))
 
-    dryness_scores = {}
-    for name, img in patches.items():
-        dryness_scores[name] = compute_flake_texture_roughness_score(img)
-    results['dryness'] = dryness_scores
 
-    
-    # return results
-        # Print all results clearly
+    # === Adjust Glow Index ===
+    adjusted_glow_scores = {}
+    region_to_conditions = defaultdict(set)
+    for cond, config in {
+        "oiliness_score": ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin'],
+        "wrinkle_score": ['forehead', 'left_eye', 'right_eye'],
+        "dark_circle_score": ['left_below_eye', 'right_below_eye'],
+        "darkspot_score": ['left_cheek', 'right_cheek', 'nose', 'chin'],
+        "dryness_score": ['left_cheek', 'right_cheek', 'nose', 'chin', 'forehead', 'left_below_eye', 'right_below_eye'],
+        "glow_index_score": ['left_cheek', 'right_cheek', 'nose', 'chin', 'forehead', 'left_below_eye', 'right_below_eye'],
+    }.items():
+        for region in config:
+            region_to_conditions[region].add(cond)
+
+    for region, glow_score in all_condition_scores['glow_index_score'].items():
+        relevant_conds = region_to_conditions[region] - {'glow_index_score'}
+        penalty = 0
+        total_weight = 0
+        for cond in relevant_conds:
+            val = all_condition_scores[cond].get(region)
+            if val is None:
+                continue
+            weight = 0.1  # Equal weight
+            penalty += weight * (val / 10)
+            total_weight += weight
+
+        final_penalty = penalty / total_weight if total_weight else 0
+        adjusted_score = round(glow_score * (1 - final_penalty), 2)
+        adjusted_glow_scores[region] = adjusted_score
+
+    # ==== Prepare final results ====
+    results['dark_circles'] = all_condition_scores['dark_circle_score']
+    results['dark_spots'] = all_condition_scores['darkspot_score']
+    results['oiliness'] = all_condition_scores['oiliness_score']
+    results['wrinkles'] = all_condition_scores['wrinkle_score']
+    results['dryness'] = all_condition_scores['dryness_score']
+    results['glow_index'] = adjusted_glow_scores
+
+    # === Print all results clearly ===
     print("\n--- Final Region-wise Scores ---", flush=True)
     for category, region_scores in results.items():
         print(f"\n{category.upper()}:", flush=True)
-    for region, score in region_scores.items():
-        print(f"  {region}: {score}", flush=True)
-
+        for region, score in region_scores.items():
+            print(f"  {region}: {score}", flush=True)
 
     return results

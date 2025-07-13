@@ -1,6 +1,6 @@
 flask
 opencv-python
-mediapipe==0.10.8
+mediapipe
 scikit-image
 numpy
 Pillow
