@@ -40,6 +40,19 @@ from skimage.filters import median
 from skimage import measure
 from collections import defaultdict
 
+import time
+import functools
+
+def timer(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        t0 = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed = time.perf_counter() - t0
+        print(f"⏱️ {func.__name__} took {elapsed:.3f} sec")
+        return result
+    return wrapper
+
 
 
 # image_path = r"C:\Users\Yash\Desktop\face_app_final\myface.jpg"  # Path to your image
@@ -163,29 +176,29 @@ def extract_forehead_patch_above_nose(
     x_left = x_left_orig
     x_right = x_right_orig
 
-    # --- Step 2: Adjust width if aspect ratio too low ---
-    attempt = 0
-    while attempt < max_attempts:
-        patch_height = y_bottom - patch_top
-        patch_width = x_right - x_left
-        aspect_ratio = patch_height / patch_width
+    # # --- Step 2: Adjust width if aspect ratio too low ---
+    # attempt = 0
+    # while attempt < max_attempts:
+    #     patch_height = y_bottom - patch_top
+    #     patch_width = x_right - x_left
+    #     aspect_ratio = patch_height / patch_width
 
-        if aspect_ratio >= min_ratio:
-            break
+    #     if aspect_ratio >= min_ratio:
+    #         break
 
-        # Shrink width
-        shrink_by = int(shrink_factor * patch_width)
-        if shrink_by < 2:
-            break
+    #     # Shrink width
+    #     shrink_by = int(shrink_factor * patch_width)
+    #     if shrink_by < 2:
+    #         break
 
-        center = (x_left + x_right) // 2
-        new_half = (patch_width - shrink_by) // 2
-        x_left = max(center - new_half, 0)
-        x_right = min(center + new_half, img_width)
+    #     center = (x_left + x_right) // 2
+    #     new_half = (patch_width - shrink_by) // 2
+    #     x_left = max(center - new_half, 0)
+    #     x_right = min(center + new_half, img_width)
 
-        patch_top = compute_patch_top(x_left, x_right)
-        attempt += 1
-        print(f"⚠ Reduced width attempt {attempt} | New aspect ratio: {aspect_ratio:.2f}")
+    #     patch_top = compute_patch_top(x_left, x_right)
+    #     attempt += 1
+    #     print(f"⚠ Reduced width attempt {attempt} | New aspect ratio: {aspect_ratio:.2f}")
 
         # --- Step 3: Extend width left and right within landmark bounds (only if hair is not inside box) ---
     while x_left > x_left_orig:
@@ -440,8 +453,8 @@ def process_image(image):
 
 
     # --- Landmark pairs for patch corners ---
-    idx_left_pair = (104, 105)
-    idx_right_pair = (333, 334)
+    idx_left_pair = (66, 69)
+    idx_right_pair = (299,296)
 
     # --- Extract forehead patch ---
     forehead_patch, coords = extract_forehead_patch_above_nose(
@@ -625,91 +638,137 @@ def adaptive_kde_threshold(channel_data, fraction=0.10):
     return x[idx]
 
 # --- Main Function ---
-def compute_darkcircle_score(img_rgb):
+import numpy as np
+import cv2
+from sklearn.cluster import KMeans
+from scipy.stats import gaussian_kde
+from skimage.color import rgb2gray
+from skimage.filters import frangi
+from skimage import img_as_float
+from skimage.morphology import skeletonize
+
+@timer
+def compute_darkcircle_score(img_rgb, eps=1e-5):
     img_np = np.array(img_rgb)
     H, W = img_np.shape[:2]
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
+    # Build exclusion mask
     exclusion_mask = np.ones((H, W), dtype=np.uint8)
-    buffer_w = W // 6
-    buffer_h = H // 3
+    buffer_w, buffer_h = W // 6, H // 3
     exclusion_mask[H-buffer_h:, :buffer_w] = 0
     exclusion_mask[H-buffer_h:, W-buffer_w:] = 0
 
-    # LAB Redness
+    # --- LAB Redness ---
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    l_channel, a_channel, b_channel = cv2.split(lab)
-    a_prime = a_channel.astype(np.int16) - 128
-    a_norm = a_prime / (l_channel.astype(np.float32) + 1e-5)
-    a_thresh = np.percentile(a_norm[(a_norm > 0) & (exclusion_mask > 0)], 70)
-    red_mask = (a_norm > a_thresh) & (exclusion_mask > 0)
-    red_severity = (np.mean(a_norm[red_mask]) - np.mean(a_norm[(~red_mask) & (exclusion_mask > 0)])) / (np.mean(a_norm[(~red_mask) & (exclusion_mask > 0)]) + 1e-5)
+    l, a, _ = cv2.split(lab)
+    a_prime = a.astype(np.int16) - 128
+    a_norm = a_prime / (l.astype(np.float32) + eps)
+    valid = (a_norm > 0) & (exclusion_mask > 0)
+    if np.any(valid):
+        a_thresh = np.percentile(a_norm[valid], 70)
+        red_mask = valid & (a_norm > a_thresh)
+        non_red = (exclusion_mask > 0) & ~red_mask
+        red_mean = np.mean(a_norm[red_mask]) if np.any(red_mask) else 0.0
+        non_red_mean = np.mean(a_norm[non_red]) if np.any(non_red) else eps
+        red_severity = (red_mean - non_red_mean) / non_red_mean
+    else:
+        red_severity = 0.0
 
-    # LAB Blueness
-    b_thresh = adaptive_kde_threshold(b_channel[exclusion_mask > 0], 0.10)
-    blue_mask = (b_channel <= int(b_thresh)) & (exclusion_mask > 0)
-    blue_severity = (-1*np.mean(b_channel[blue_mask]) + np.mean(b_channel[(~blue_mask) & (exclusion_mask > 0)])) / (np.mean(b_channel[blue_mask]) + 1e-5)
+    # --- LAB Blueness ---
+    b = lab[:, :, 2]
+    b_vals = b[exclusion_mask > 0]
+    if b_vals.size:
+        b_thresh = adaptive_kde_threshold(b_vals, 0.10)
+        blue_mask = (b <= int(b_thresh)) & (exclusion_mask > 0)
+        non_blue = (exclusion_mask > 0) & ~blue_mask
+        blue_mean = np.mean(b[blue_mask]) if np.any(blue_mask) else 0.0
+        non_blue_mean = np.mean(b[non_blue]) if np.any(non_blue) else eps
+        blue_severity = (non_blue_mean - blue_mean) / (blue_mean + eps)
+    else:
+        blue_severity = 0.0
 
-    # Darkness (HSV V-channel)
+    # --- Darkness (HSV V-channel) ---
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    v_img = hsv[:, :, 2]
-    v_masked = v_img[exclusion_mask > 0]
-    kde = gaussian_kde(v_masked.flatten())
-    v_vals = np.linspace(0, 255, 256)
-    kde_vals = kde(v_vals)
-    diffs = np.diff(kde_vals)
-    if diffs.ndim == 0 or diffs.size < 2:
+    v = hsv[:, :, 2]
+    v_masked = v[exclusion_mask > 0].flatten()
+    if v_masked.size:
+        kde = gaussian_kde(v_masked)
+        v_vals = np.linspace(0, 255, 256)
+        kde_vals = kde(v_vals)
+        diffs = np.diff(kde_vals)
+        cond = (np.hstack(([False], diffs[:-1] < 0)) &
+                np.hstack((diffs[1:] > 0, [False])))
+        valleys = np.where(cond)[0]
+    else:
         valleys = []
-    else:
-        # valleys = np.where((np.hstack(([False], diffs[:-1] < 0)) & (np.hstack((diffs[1:] > 0, [False]))))[0])
-        condition = (np.hstack(([False], diffs[:-1] < 0)) & np.hstack((diffs[1:] > 0, [False])))
-        valleys = np.where(condition)[0]
+
     if len(valleys) >= 2:
-        v_thresh1 = int(v_vals[valleys[0]])
-        v_thresh2 = int(v_vals[valleys[1]])
+        v_thresh1, v_thresh2 = int(v_vals[valleys[0]]), int(v_vals[valleys[1]])
     else:
+        # fallback to KMeans
         km = KMeans(n_clusters=3, random_state=0).fit(v_masked.reshape(-1, 1))
         centers = sorted(km.cluster_centers_.flatten())
         v_thresh1, v_thresh2 = int(centers[0]), int(centers[1])
 
     thresholds = {
-        'low': {'min': v_thresh2 + 1, 'max': 255},
+        'low':      {'min': v_thresh2 + 1, 'max': 255},
         'moderate': {'min': v_thresh1 + 1, 'max': v_thresh2},
-        'high': {'min': 0, 'max': v_thresh1}
+        'high':     {'min': 0, 'max': v_thresh1}
     }
-    level_masks = {level: cv2.inRange(v_img, cfg['min'], cfg['max']) & exclusion_mask for level, cfg in thresholds.items()}
+    level_masks = {
+        lvl: ((v >= cfg['min']) & (v <= cfg['max']) & (exclusion_mask > 0))
+        for lvl, cfg in thresholds.items()
+    }
 
-    v_low = np.median(v_img[level_masks['low'] > 0]) + 1e-5
-    v_mid = np.median(v_img[level_masks['moderate'] > 0])
-    v_high = np.median(v_img[level_masks['high'] > 0])
-    darkness_severity = (v_low / v_high + v_mid / v_high + v_low / v_mid)
+    # Safely compute medians
+    medians = {}
+    for lvl in ['low','moderate','high']:
+        vals = v[level_masks[lvl]]
+        medians[lvl] = np.median(vals) if vals.size else eps
 
-    high_area = np.sum(level_masks['high'] > 0)
-    moderate_area = np.sum(level_masks['moderate'] > 0)
-    low_area = np.sum(level_masks['low'] > 0)
+    v_low, v_mid, v_high = medians['low'], medians['moderate'], medians['high']
+    # guard against zero
+    darkness_severity = (
+        (v_low / (v_high + eps)) +
+        (v_mid / (v_high + eps)) +
+        (v_low / (v_mid + eps))
+    )
 
-    # Vesselness
+    # Area ratios
+    high_area = np.sum(level_masks['high'])
+    moderate_area = np.sum(level_masks['moderate'])
+    low_area = np.sum(level_masks['low'])
+    area_ratio = (high_area + moderate_area) / max(high_area + moderate_area + low_area, 1)
+
+    # --- Vesselness ---
     gray = rgb2gray(img_np)
     vesselness = frangi(img_as_float(gray))
-    dark_mask_combined = ((level_masks['moderate'] > 0) | (level_masks['high'] > 0))
-    vessel_masked = vesselness * dark_mask_combined
-    threshold = np.percentile(vessel_masked[vessel_masked > 0], 90) if np.any(vessel_masked > 0) else 1
-    vessel_mask = vessel_masked > threshold
-    skeleton = skeletonize(vessel_mask)
-    skeleton_length = np.sum(skeleton)
-    vessel_score = skeleton_length * (vessel_masked[vessel_mask].mean() if np.any(vessel_mask) else 0)/(2*(H + W))
+    dark_mask = level_masks['high'] | level_masks['moderate']
+    vessel_masked = vesselness * dark_mask
+    if np.any(vessel_masked > 0):
+        thresh_v = np.percentile(vessel_masked[vessel_masked > 0], 90)
+        vessel_bin = vessel_masked > thresh_v
+        skeleton = skeletonize(vessel_bin)
+        length = skeleton.sum()
+        mean_val = vessel_masked[vessel_bin].mean() if np.any(vessel_bin) else 0.0
+        vessel_score = length * mean_val / (2*(H + W) + eps)
+    else:
+        vessel_score = 0.0
 
-    # Final Score
-    final_score = 40*(
-        0.8 * ((darkness_severity / 6)**(0.55)) +
-        0.05 * (red_severity / 3) +
-        0.05 * (blue_severity / 2) +
-        0.1 * (vessel_score / 0.6)
-    ) * (((high_area + moderate_area)/(high_area + moderate_area + low_area)))*(darkness_severity)*(10/9)
+    # --- Final Score on 0–10 scale ---
+    final = 40 * (
+        0.8 * (darkness_severity/6)**0.55 +
+        0.05 * (red_severity/3) +
+        0.05 * (blue_severity/2) +
+        0.1 * (vessel_score/0.6)
+    ) * area_ratio * darkness_severity * (10/9)
 
-    score_10 = compress_score_dc(final_score)
+    # compress_score_dc should map to 0–10; protect against NaN
+    score_10 = compress_score_dc(final) if not np.isnan(final) else 0.0
 
-    return score_10    ### have to chnage
+    return float(score_10)
+
 
 
 
@@ -728,6 +787,7 @@ def compute_darkcircle_score(img_rgb):
 
 
 ##########################DARK SPOTS##############################
+@timer
 def compute_darkspot_score(img):
     intervals = {
         'bound': {'min': 100, 'max': 255},
@@ -736,7 +796,7 @@ def compute_darkspot_score(img):
         'high': {'min': 200, 'max': 255},
     }
 
-    severity_colors = [(0, 0, 255), (128, 0, 128), (255, 0, 0), (0, 255, 0), (0, 0, 0)]  # Red → Black
+    # severity_colors = [(0, 0, 255), (128, 0, 128), (255, 0, 0), (0, 255, 0), (0, 0, 0)]  # Red → Black
 
     def find_clean_contours(mask, shape):
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -780,26 +840,42 @@ def compute_darkspot_score(img):
         thresholds = np.histogram_bin_edges(areas, bins=bins)
         return [c for c in contours if cv2.contourArea(c) > thresholds[1]]
 
-    # def map_score_to_10(score):
-    #     if score >= 0.27: return 10
-    #     elif score >= 0.24: return 9
-    #     elif score >= 0.21: return 8
-    #     elif score >= 0.18: return 7
-    #     elif score >= 0.15: return 6
-    #     elif score >= 0.12: return 5
-    #     elif score >= 0.10: return 4
-    #     elif score >= 0.08: return 3
-    #     elif score >= 0.06: return 2
-    #     else: return 1
+    # === Interpolation Functions ===
+    def linear_interpolate_severity(score):
+        points = [
+            (0.06, 2), (0.08, 3), (0.10, 4), (0.12, 5), (0.15, 6),
+            (0.18, 7), (0.21, 8), (0.24, 9), (0.27, 9.5)
+        ]
+        for i in range(len(points) - 1):
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+            if x0 <= score <= x1:
+                return y0 + (score - x0) * (y1 - y0) / (x1 - x0)
+        return 1.0 if score < points[0][0] else 10.0
 
-    def compress_score_ds(value):
-      scaled = 1 + (value - 0.1558) * (8 / (0.3894 - 0.1558))
-      if scaled > 9.5:
-        return 9.5
-      if scaled < 1:
-        return 1
+    def linear_interpolate_dev(ratio):
+        points = [
+            (0.7, 9.5), (0.75, 9), (0.80, 8), (0.85, 7), (0.90, 6),
+            (0.925, 5), (0.95, 4), (0.975, 3), (1.0, 2)
+        ]
+        for i in range(len(points) - 1):
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+            if x0 <= ratio <= x1:
+                return y0 + (ratio - x0) * (y1 - y0) / (x1 - x0)
+        return 10.0 if ratio < points[0][0] else 1.0
 
-      return round(scaled, 2)
+    def linear_interpolate_acne(score):
+        points = [
+            (0.0005, 2), (0.001, 4), (0.002, 6),
+            (0.003, 8), (0.004, 10)
+        ]
+        for i in range(len(points) - 1):
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+            if x0 <= score <= x1:
+                return y0 + (score - x0) * (y1 - y0) / (x1 - x0)
+        return 1.0 if score < points[0][0] else 10.0
 
 
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -858,12 +934,11 @@ def compute_darkspot_score(img):
         if inner_sum / (area_outer + 1e-5) < 0.6:
             final_cleaned.append(c_outer)
 
-    image_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(image_hsv)
-    image_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(image_lab)
-
+    h, s, v = cv2.split(hsv)
+    a = cv2.split(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB))[1]
+    acne_contours = []
     results = []
+
     for i, c in enumerate(final_cleaned):
         mask = np.zeros_like(v, dtype=np.uint8)
         cv2.drawContours(mask, [c], -1, 255, -1)
@@ -873,21 +948,20 @@ def compute_darkspot_score(img):
         dark_score = np.sum(dark_mask)
         total = acne_score + dark_score + 1e-5
         label = "acne" if acne_score > dark_score else "dark spot"
-        confidence = max(acne_score, dark_score) / total
-        results.append((i + 1, label, confidence))
+        if label == "acne":
+            acne_contours.append(c)
+        results.append((i + 1, label, max(acne_score, dark_score) / total))
 
-    acne_area = sum(cv2.contourArea(final_cleaned[i - 1]) for i, l, _ in results if l == "acne")
-    dark_area = sum(cv2.contourArea(final_cleaned[i - 1]) for i, l, _ in results if l == "dark spot")
-    pad_indices = set()
-    if acne_area / (dark_area + 1e-5) > 0.4:
-        for i, (idx, label, conf) in enumerate(results):
-            if label == "dark spot":
-                results[i] = (idx, "PAD", conf)
-                pad_indices.add(idx)
+    acne_area = sum(cv2.contourArea(c) for c in acne_contours)
+    total_area = img.shape[0] * img.shape[1]
+    acne_score = 2.4*(acne_area) / (total_area + 1e-5)
+    # acne_severity = round(linear_interpolate_acne(acne_score), 2)
+    if acne_score > 1:
+             acne_score  = 1
 
     v_ratios = []
     for idx, label, conf in results:
-        if label in ["PAD", "dark spot"]:
+        if label == "dark spot":
             c = final_cleaned[idx - 1]
             mask = np.zeros_like(v, dtype=np.uint8)
             cv2.drawContours(mask, [c], -1, 255, -1)
@@ -896,57 +970,34 @@ def compute_darkspot_score(img):
             ratio = lesion_median / (healthy_skin_V + 1e-5)
             v_ratios.append((c, ratio))
 
-    if not v_ratios:
-        return 0.0, 1, img_bgr  # No lesions, return clean image
-
     ratios_only = [r for _, r in v_ratios]
     bin_edges = np.histogram_bin_edges(ratios_only, bins=5)
     colored_output = img_bgr.copy()
     weighted_sum = 0
-    total_area = img.shape[0] * img.shape[1]
-
     for c, ratio in v_ratios:
         bin_index = np.digitize(ratio, bin_edges, right=True) - 1
         bin_index = max(0, min(bin_index, 4))
-        color = severity_colors[bin_index]
+        color = [(0, 0, 255), (128, 0, 128), (255, 0, 0), (0, 255, 0), (0, 0, 0)][bin_index]
         cv2.drawContours(colored_output, [c], -1, color, 1)
         weighted_sum += (1 / ratio) * cv2.contourArea(c)
 
     severity_score = weighted_sum / total_area
-    severity_score_final = compress_score_ds(severity_score)
-
-    return severity_score_final, colored_output
-
-
-# selected_regions = ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']
-# darkspots_scores = {}
-
-# for region in selected_regions:
-#     if region in patches:
-#         score, _ = compute_darkspot_score(patches[region])
-#         darkspots_scores[region] = score
-#     else:
-#         print(f"Warning: {region} patch not found in patches dictionary.")
+    darkspot_score_final = round(linear_interpolate_severity(severity_score), 2)
+    return darkspot_score_final, acne_score
 
 
 ######################################OILINESS#########################################
 
-def compress_score_oil(value):
-      scaled = 1 + (value - 0) * (8 / (0.3 - 0))
-      if scaled > 9.5:
-        return 9.5
-      if scaled < 1:
-        return 1
+import cv2
+import numpy as np
+from sklearn.cluster import KMeans
+from scipy.stats import gaussian_kde
 
-      return round(scaled, 2)
 
-def get_kmeans_thresh(data, high=True):
-    kmeans = KMeans(n_clusters=2, random_state=0).fit(data)
-    centers = sorted(kmeans.cluster_centers_.flatten())
-    return int(centers[1] if high else centers[0])
-
-def get_kde_thresh(channel_values, high=True):
-    data = channel_values.flatten()
+def get_kde_thresh(data, high=True):
+    data = data.flatten()
+    if len(data) == 0:
+        return 128
     if np.std(data) < 1e-3 or len(np.unique(data)) < 10:
         return int(np.percentile(data, 90 if high else 10))
     try:
@@ -967,53 +1018,61 @@ def get_kde_thresh(channel_values, high=True):
     except np.linalg.LinAlgError:
         return int(np.percentile(data, 90 if high else 10))
 
+def subsample(data, max_samples=2000):
+    if len(data) > max_samples:
+        idx = np.random.choice(len(data), size=max_samples, replace=False)
+        return data[idx]
+    return data
+
+@timer
 def compute_oiliness_score(img_rgb):
     # --- Create mask to exclude purple padding ---
+    # --- Purple Mask ---
+    img_np = np.array(img_rgb)
+
     lower_purple = np.array([120, 0, 120])
     upper_purple = np.array([160, 50, 160])
-    purple_mask = cv2.inRange(img_rgb, lower_purple, upper_purple)
+    purple_mask = cv2.inRange(img_np, lower_purple, upper_purple)
     valid_mask = (purple_mask == 0)
 
-    # --- HSV Processing ---
-    img_hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
-    v, s = img_hsv[:, :, 2], img_hsv[:, :, 1]
+    # --- HSV Channels -------------------------------------------------------
+    img_hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+    v = img_hsv[:, :, 2]
+    s = img_hsv[:, :, 1]
 
-    v_valid = v[valid_mask].reshape(-1, 1)
-    s_valid = s[valid_mask].reshape(-1, 1)
+    v_valid = subsample(v[valid_mask])
+    s_valid = subsample(s[valid_mask])
 
-    v_thresh = int((get_kmeans_thresh(v_valid, high=True) + get_kde_thresh(v_valid, high=True)) / 2)
-    s_thresh = int((get_kmeans_thresh(s_valid, high=False) + get_kde_thresh(s_valid, high=False)) / 2)
+    v_base = get_kde_thresh(v_valid, high=True)
+    s_base = get_kde_thresh(s_valid, high=False)
+    v_thresh = int(v_base * 0.93125)
+    s_thresh = int(s_base * 1.05)
 
     v_mask = ((v >= v_thresh) & valid_mask).astype(np.uint8)
     s_mask = ((s <= s_thresh) & valid_mask).astype(np.uint8)
     oil_mask = cv2.bitwise_and(v_mask, s_mask) * 255
 
-    # --- KMeans for Bright Cluster ---
-    valid_rgb = img_rgb[valid_mask].reshape(-1, 3)
-    kmeans = KMeans(n_clusters=3, random_state=42).fit(valid_rgb)
-    centers = kmeans.cluster_centers_
-    labels_valid = kmeans.labels_
+    # --- Bright Mask via RELAXED RGB Sum ------------------------------------
+    rgb_sum = img_np.sum(axis=2)
+    bright_base = np.percentile(rgb_sum[valid_mask], 95)
+    bright_thresh = bright_base * 0.925
+    bright_mask = ((rgb_sum >= bright_thresh) & valid_mask).astype(np.uint8) * 255
 
-    labels_full = np.zeros(img_rgb.shape[:2], dtype=np.int32)
-    labels_full[valid_mask] = labels_valid
-    brightest_idx = np.argmax(np.sum(centers, axis=1))
-    bright_mask = ((labels_full == brightest_idx) & valid_mask).astype(np.uint8) * 255
-
-    # --- Yellow + Green Overlays ---
-    overlay_oil = img_rgb.copy()
+    # --- Overlays -----------------------------------------------------------
+    overlay_oil = img_np.copy()
     overlay_oil[(oil_mask == 255) & valid_mask] = [255, 255, 0]
-    blended_oil = cv2.addWeighted(img_rgb, 0.7, overlay_oil, 0.3, 0)
+    blended_oil = cv2.addWeighted(img_np, 0.7, overlay_oil, 0.3, 0)
 
-    overlay_bright = img_rgb.copy()
+    overlay_bright = img_np.copy()
     overlay_bright[(bright_mask == 255) & valid_mask] = [0, 255, 0]
-    blended_bright = cv2.addWeighted(img_rgb, 0.7, overlay_bright, 0.3, 0)
+    blended_bright = cv2.addWeighted(img_np, 0.7, overlay_bright, 0.3, 0)
 
-    combined = img_rgb.copy()
+    combined = img_np.copy()
     combined[(bright_mask == 255) & valid_mask] = [0, 255, 0]
     combined[(oil_mask == 255) & valid_mask] = [255, 255, 0]
-    blended_combined = cv2.addWeighted(img_rgb, 0.6, combined, 0.4, 0)
+    blended_combined = cv2.addWeighted(img_np, 0.6, combined, 0.4, 0)
 
-    # --- Scores ---
+    # --- Score Calculation --------------------------------------------------
     intersection_mask = ((oil_mask == 255) & (bright_mask == 255) & valid_mask)
     union_mask = (((oil_mask == 255) | (bright_mask == 255)) & valid_mask)
 
@@ -1027,46 +1086,28 @@ def compute_oiliness_score(img_rgb):
     bright_pixels = np.sum(bright_mask == 255)
     bright_coverage_ratio = bright_pixels / total_valid_pixels if total_valid_pixels > 0 else 0
 
+    # --- Quality of match (same as before) ----------------------------------
     if bright_coverage_ratio >= 0.7:
-        final_score = overlap_ratio
+        quality = overlap_ratio
     else:
-        final_score = (overlap_ratio ** 0.75) * (jaccard_ratio ** 0.5)
+        quality = (overlap_ratio ** 0.75) * (jaccard_ratio ** 0.5)
 
-    # --- Final Score Out of 10 ---    0.24,0.21,0.18,0.15,0.12,0.10,0.08,0.06,0.04
-    # if final_score >= 0.30:
-    #     score_out_of_10 = 10
-    # elif final_score >= 0.25:
-    #     score_out_of_10 = 9
-    # elif final_score >= 0.21:
-    #     score_out_of_10 = 8
-    # elif final_score >= 0.18:
-    #     score_out_of_10 = 7
-    # elif final_score >= 0.15:
-    #     score_out_of_10 = 6
-    # elif final_score >= 0.13:
-    #     score_out_of_10 = 5
-    # elif final_score >= 0.11:
-    #     score_out_of_10 = 4
-    # elif final_score >= 0.08:
-    #     score_out_of_10 = 3
-    # elif final_score >= 0.05:
-    #     score_out_of_10 = 2
-    # else:
-    #     score_out_of_10 = 1
+    # --- NEW: resolution‑aware dampening ------------------------------------
+    coverage   = total_valid_pixels / valid_mask.size     # skin to image ratio (0–1)
+    spread     = coverage ** 0.5                          # √coverage
+    N0         = 20_000                                   # pixels for 63% confidence
+    confidence = 1 - np.exp(- total_valid_pixels / N0)    # 0–1 confidence term
 
-    return compress_score_oil(final_score), blended_oil
+    final_score = quality * spread * confidence
+    # -----------------------------------------------------------------------
 
-# selected_regions = ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']
-# oiliness_scores = {}
+    # --- Linear Interpolation to 0–10 scale --------------------------------
+    score_breakpoints = [0.0, 0.04, 0.06, 0.08, 0.10, 0.12, 0.15, 0.18, 0.21, 0.27, 0.3]
+    score_values      = [1.0,  2.0,  3.0,  4.0,  5.0,  6.0,  7.0,  8.0,  9.0,  9.5, 10.0]
+    score_out_of_10 = float(np.interp(final_score, score_breakpoints, score_values))
+    score_out_of_10 = round(score_out_of_10, 2)
 
-# for region in selected_regions:
-#     if region in patches:
-#         score, _ = compute_oiliness_score(patches[region])
-#         oiliness_scores[region] = score
-#     else:
-#         print(f"Warning: {region} patch not found in patches dictionary.")
-
-
+    return score_out_of_10,blended_oil
 
 
 ###############################WRINKLES#########################################
@@ -1117,6 +1158,7 @@ def wrinkle_mask_overlay(rgb_image, color=(255, 0, 0)):
 
     return overlay, clean_mask
 
+@timer
 def compute_wrinkle_score(wrinkle_mask, mask):    ## modify this function
   # Only consider pixels where mask is white (255)
   valid_region = (mask == 255)
@@ -1148,6 +1190,7 @@ def compute_wrinkle_score(wrinkle_mask, mask):    ## modify this function
 
 #######################GLOW INDEX##################################
 
+@timer
 def compute_glowindex_score(img_rgb):
     def compute_evenness_map(image, cluster_size=20):
         h, w = image.shape[:2]
@@ -1351,6 +1394,7 @@ def compute_glcm_roughness(image_bgr):
     return score
 
 # --- Wrapper Function ---
+@timer
 def compute_dryness_score(image_rgb):
     image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
     texture_score, contour_score = texture(image_bgr)
@@ -1424,109 +1468,113 @@ def compute_dryness_score(image_rgb):
 #         print(f"  {region}: {score}", flush=True)
 
 
-#     return results
+from collections import defaultdict
+import numpy as np
+import cv2
+import time
+
+
+from collections import defaultdict
+import cv2
+import numpy as np
+
 def analyze_image_all_regions(image_np):
-
-    image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-    patches = process_image(image_bgr)
     results = {}
-
-    # Create containers to hold condition scores
     all_condition_scores = defaultdict(dict)
 
-    # Dark Circle
-    for region in ['left_below_eye', 'right_below_eye']:
+    try:
+        print("🔄 [1] Converting to BGR and extracting patches")
+        image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        patches = process_image(image_bgr)
+        print(f"    ✅ Patches keys: {list(patches.keys())}")
+
+        print("🟤 [2] Computing dark circle scores")
+        for region in ['left_below_eye', 'right_below_eye']:
             score = compute_darkcircle_score(patches[region])
             all_condition_scores['dark_circle_score'][region] = score
 
-    # Dark Spot
-    for region in ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']:
-            score, _ = compute_darkspot_score(patches[region])
+        print("⚫ [3] Computing dark spot scores")
+        for region in ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']:
+            raw = compute_darkspot_score(patches[region])
+            score = raw[0] if isinstance(raw, (tuple, list)) else raw
             all_condition_scores['darkspot_score'][region] = score
 
-    # Oiliness
-    for region in ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']:
+        print("💧 [4] Computing oiliness scores")
+        for region in ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin']:
             score, _ = compute_oiliness_score(patches[region])
             all_condition_scores['oiliness_score'][region] = score
-
-    # Enforce symmetry for oiliness
-    if 'left_cheek' in all_condition_scores['oiliness_score'] and 'right_cheek' in all_condition_scores['oiliness_score']:
-        l = all_condition_scores['oiliness_score']['left_cheek']
-        r = all_condition_scores['oiliness_score']['right_cheek']
+        l = all_condition_scores['oiliness_score'].get('left_cheek', 0)
+        r = all_condition_scores['oiliness_score'].get('right_cheek', 0)
         avg = round((l + r) / 2, 2)
         all_condition_scores['oiliness_score']['left_cheek'] = avg
         all_condition_scores['oiliness_score']['right_cheek'] = avg
 
-    # Wrinkles
-    for region in ['forehead', 'left_eye', 'right_eye']:
-        patch = patches[region]
+        print("🧓 [5] Computing wrinkle scores")
+        for region in ['forehead', 'left_eye', 'right_eye']:
+            patch = patches[region]
+            if region in ['left_eye', 'right_eye']:
+                img, mask = patch
+                _, wrinkle_mask = wrinkle_mask_overlay(img)
+                score = compute_wrinkle_score(wrinkle_mask, mask)
+            else:
+                _, wrinkle_mask = wrinkle_mask_overlay(patch)
+                raw_ratio = np.sum(wrinkle_mask > 0) / wrinkle_mask.size
+                score = round(min(raw_ratio / 0.02, 1.0) * 10)
+            all_condition_scores['wrinkle_score'][region] = score
 
-        if region in ['left_eye', 'right_eye']:
-            img, mask = patch  # Unpack (image, mask)
-            _, wrinkle_mask = wrinkle_mask_overlay(img)
-            score = compute_wrinkle_score(wrinkle_mask, mask)
-        else:
-            # Forehead: patch is just the image
-            _, wrinkle_mask = wrinkle_mask_overlay(patch)
-            raw_ratio = np.sum(wrinkle_mask > 0) / wrinkle_mask.size
-            score = round(min(raw_ratio / 0.02, 1.0) * 10)
+        print("💦 [6] Computing dryness scores")
+        for region in ['left_cheek','right_cheek','nose','chin','forehead','left_below_eye','right_below_eye']:
+            if region in patches:
+                score = compute_dryness_score(patches[region])
+                all_condition_scores['dryness_score'][region] = int(score)
 
-        all_condition_scores['wrinkle_score'][region] = score
+        print("✨ [7] Computing glow index scores")
+        for region in ['left_cheek','right_cheek','nose','chin','forehead','left_below_eye','right_below_eye']:
+            if region in patches:
+                score = compute_glowindex_score(patches[region])
+                all_condition_scores['glow_index_score'][region] = int(score)
 
+        print("🔧 [8] Adjusting glow index with penalties")
+        region_to_conditions = defaultdict(set)
+        mapping = {
+            "oiliness_score": ['left_cheek','right_cheek','forehead','nose','chin'],
+            "wrinkle_score": ['forehead','left_eye','right_eye'],
+            "dark_circle_score": ['left_below_eye','right_below_eye'],
+            "darkspot_score": ['left_cheek','right_cheek','nose','chin'],
+            "dryness_score": ['left_cheek','right_cheek','nose','chin','forehead','left_below_eye','right_below_eye'],
+            "glow_index_score": ['left_cheek','right_cheek','nose','chin','forehead','left_below_eye','right_below_eye'],
+        }
+        for cond, regs in mapping.items():
+            for region in regs:
+                region_to_conditions[region].add(cond)
 
+        adjusted = {}
+        for region, glow in all_condition_scores['glow_index_score'].items():
+            relevant = region_to_conditions[region] - {'glow_index_score'}
+            penalty = total_wt = 0
+            for cond in relevant:
+                val = all_condition_scores[cond].get(region)
+                if val is None: continue
+                wt = 0.1
+                penalty += wt * (val / 10)
+                total_wt += wt
+            final_penalty = penalty / total_wt if total_wt else 0
+            adjusted[region] = round(glow * (1-final_penalty), 2)
+        all_condition_scores['glow_index_score'] = adjusted
 
-    for region in ['left_cheek', 'right_cheek', 'nose', 'chin', 'forehead', 'left_below_eye', 'right_below_eye']:
-        if region in patches:
-            all_condition_scores['dryness_score'][region] = int(compute_dryness_score(patches[region]))
+        print("🏁 [9] Preparing final results")
+        results['dark_circles'] = all_condition_scores['dark_circle_score']
+        results['dark_spots']   = all_condition_scores['darkspot_score']
+        results['oiliness']     = all_condition_scores['oiliness_score']
+        results['wrinkles']     = all_condition_scores['wrinkle_score']
+        results['dryness']      = all_condition_scores['dryness_score']
+        results['glow_index']   = all_condition_scores['glow_index_score']
 
-    for region in ['left_cheek', 'right_cheek', 'nose', 'chin', 'forehead', 'left_below_eye', 'right_below_eye']:
-        if region in patches:
-            all_condition_scores['glow_index_score'][region] = int(compute_glowindex_score(patches[region]))
+        print("\n--- Final Region-wise Scores ---")
+        for cat, scores in results.items():
+            print(f"{cat.upper()}: {scores}")
 
-
-    # === Adjust Glow Index ===
-    adjusted_glow_scores = {}
-    region_to_conditions = defaultdict(set)
-    for cond, config in {
-        "oiliness_score": ['left_cheek', 'right_cheek', 'forehead', 'nose', 'chin'],
-        "wrinkle_score": ['forehead', 'left_eye', 'right_eye'],
-        "dark_circle_score": ['left_below_eye', 'right_below_eye'],
-        "darkspot_score": ['left_cheek', 'right_cheek', 'nose', 'chin'],
-        "dryness_score": ['left_cheek', 'right_cheek', 'nose', 'chin', 'forehead', 'left_below_eye', 'right_below_eye'],
-        "glow_index_score": ['left_cheek', 'right_cheek', 'nose', 'chin', 'forehead', 'left_below_eye', 'right_below_eye'],
-    }.items():
-        for region in config:
-            region_to_conditions[region].add(cond)
-
-    for region, glow_score in all_condition_scores['glow_index_score'].items():
-        relevant_conds = region_to_conditions[region] - {'glow_index_score'}
-        penalty = 0
-        total_weight = 0
-        for cond in relevant_conds:
-            val = all_condition_scores[cond].get(region)
-            if val is None:
-                continue
-            weight = 0.1  # Equal weight
-            penalty += weight * (val / 10)
-            total_weight += weight
-
-        final_penalty = penalty / total_weight if total_weight else 0
-        adjusted_score = round(glow_score * (1 - final_penalty), 2)
-        adjusted_glow_scores[region] = adjusted_score
-
-    # ==== Prepare final results ====
-    results['dark_circles'] = all_condition_scores['dark_circle_score']
-    results['dark_spots'] = all_condition_scores['darkspot_score']
-    results['oiliness'] = all_condition_scores['oiliness_score']
-    results['wrinkles'] = all_condition_scores['wrinkle_score']
-    results['dryness'] = all_condition_scores['dryness_score']
-    results['glow_index'] = adjusted_glow_scores
-
-    # === Print all results clearly ===
-    print("\n--- Final Region-wise Scores ---", flush=True)
-    for category, region_scores in results.items():
-        print(f"\n{category.upper()}:", flush=True)
-        for region, score in region_scores.items():
-            print(f"  {region}: {score}", flush=True)
+    except Exception as e:
+        print("❌ Analysis error:", e)
 
     return results
