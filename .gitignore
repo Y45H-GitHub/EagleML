@@ -1,5 +1,41 @@
+# Python
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
 
-.vscode
-venv
-__pycache__
-*/__pycache__
+# Virtualenv
+venv/
+.env
+.env.*
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar
+*.pid
+
+# Byte-compiled
+*.so
+
+# Test cache
+.pytest_cache/
+
+# Jupyter/IPython
+.ipynb_checkpoints/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Railway-specific (optional)
+railway.json

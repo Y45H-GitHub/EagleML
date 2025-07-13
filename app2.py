@@ -12,6 +12,7 @@ from PIL import Image
 from io import BytesIO
 import json
 import traceback
+import os
 
 # Import the mock analysis function from the other file
 # In your actual implementation, you would import your real 'analyze_image_all_regions'
@@ -103,4 +104,4 @@ if __name__ == '__main__':
     # Runs the Flask app. 'debug=True' provides detailed error pages
     # and reloads the server automatically when you save changes.
     # For production, use a proper WSGI server like Gunicorn or uWSGI.
-    app.run(debug=True, port=5001)
+    app.run(debug=True, port=int(os.environ.get("PORT", 5001)))
