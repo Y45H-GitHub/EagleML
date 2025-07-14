@@ -1276,11 +1276,23 @@ def compute_glowindex_score(img_rgb):
     overlay, avg_hi, avg_mid = highlight_top_evenness_clusters(img_bgr, scores, cluster)
 
     combined = (20 - avg_hi) * 0.3 + 0.7 * (10 - avg_mid)
-    evenness_score = max(1, min(10, int(round(10 if combined >= 10 else combined))))  # clamp to [1, 10]
+    score_1 = 1 + (combined + 41.5563) * (8 / (-15.5595 + 41.5563))
+    if score_1 > 9.5:
+      score_1 = 9.5
+    if score_1 < 1:
+      score_1 = 1
 
-    contrast, smoothness_score, glcm_matrix = compute_glcm_smoothness(img_bgr)
+    contrast= compute_glcm_smoothness(img_bgr)
 
-    final_score = round((evenness_score + smoothness_score) / 2, 2)
+    score_2 = 1 + (contrast - 3) * (8 / (36 - 3))
+    if score_2 > 9.5:
+      score_2 = 9.5
+    if score_2 < 1:
+      score_2 = 1
+
+    score_2=9.5-score_2
+
+    final_score = round((score_1 + score_2) / 2, 2)
 
     return final_score
 
@@ -1322,28 +1334,12 @@ def texture(image_bgr):
     # Final score
     contour_score = total_contour_area / patch_area
 
-    if contour_score <= 1:
-        score = 1
-    elif contour_score <= 2:
-        score = 2
-    elif contour_score <= 3:
-        score = 3
-    elif contour_score <= 4:
-        score = 4
-    elif contour_score <= 5:
-        score = 5
-    elif contour_score <= 6:
-        score = 6
-    elif contour_score <= 7:
-        score = 7
-    elif contour_score <= 8:
-        score = 8
-    elif contour_score <= 9:
-        score = 9
-    else:
-        score = 10
-
-    return score, contour_score
+    score = 1 + (contour_score - 0) * (8 / (0.0017 - 0))
+    if score > 9.5:
+      score = 9.5
+    if score < 1:
+      score = 1
+    return score
 
 # --- Roughness score ---
 def compute_glcm_roughness(image_bgr):
@@ -1354,37 +1350,20 @@ def compute_glcm_roughness(image_bgr):
                         angles=[0, np.pi/4, np.pi/2, 3*np.pi/4],
                         symmetric=True, normed=True)
     contrast = graycoprops(glcm, 'contrast').mean()
-
-    if contrast <= 7.5:
-        score = 1
-    elif contrast <= 15:
-        score = 2
-    elif contrast <= 30:
-        score = 3
-    elif contrast <= 40:
-        score = 4
-    elif contrast <= 50:
-        score = 5
-    elif contrast <= 60:
-        score = 6
-    elif contrast <= 70:
-        score = 7
-    elif contrast <= 85:
-        score = 8
-    elif contrast <= 100:
-        score = 9
-    else:
-        score = 10
-
+    score = 1 + (contrast - 3) * (8 / (36 - 3))
+    if score > 9.5:
+      score = 9.5
+    if score < 1:
+      score = 1
     return score
 
 # --- Wrapper Function ---
 @timer
 def compute_dryness_score(image_rgb):
     image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-    texture_score, contour_score = texture(image_bgr)
+    texture_score = texture(image_bgr)
     roughness_score = compute_glcm_roughness(image_bgr)
-    final_score = round((texture_score + roughness_score) / 2)
+    final_score = round((0.2*texture_score + 0.8*roughness_score),2)
 
     return final_score
 
