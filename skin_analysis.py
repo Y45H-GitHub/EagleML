@@ -1243,29 +1243,7 @@ def compute_glowindex_score(img_rgb):
                             angles=[0, np.pi/4, np.pi/2, 3*np.pi/4],
                             symmetric=True, normed=True)
         contrast = graycoprops(glcm, 'contrast').mean()
-
-        if contrast <= 7.5:
-            score = 10
-        elif contrast <= 15:
-            score = 9
-        elif contrast <= 30:
-            score = 8
-        elif contrast <= 40:
-            score = 7
-        elif contrast <= 50:
-            score = 6
-        elif contrast <= 60:
-            score = 5
-        elif contrast <= 70:
-            score = 4
-        elif contrast <= 85:
-            score = 3
-        elif contrast <= 100:
-            score = 2
-        else:
-            score = 1
-
-        return contrast, score, glcm[:, :, 0, 0]
+        return contrast
 
     # --- Actual Execution ---
     img_bgr=cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
