@@ -1113,39 +1113,21 @@ def compute_oiliness_score(img_rgb):
 
 ###############################WRINKLES#########################################
 
-def wrinkle_mask_overlay(rgb_image, color=(255, 0, 0)):
-    """
-    Applies CLAHE + Frangi + Skeletonize on a single RGB image and returns wrinkle overlay.
+def compute_vesselness(gray_img, sigmas=[5]):
+    norm_img = gray_img.astype(np.float32) / 255.0
+    vessel = frangi(norm_img, sigmas=sigmas, black_ridges=True)
+    vessel_norm = ((vessel - vessel.min()) / (np.ptp(vessel) + 1e-9))
+    return vessel_norm
 
-    Args:
-        rgb_image (np.ndarray): Input RGB image (e.g., facial patch).
-        color (tuple): RGB color for wrinkle overlay (default = red).
-
-    Returns:
-        overlay (np.ndarray): RGB image with wrinkles marked in specified color.
-        wrinkle_mask (np.ndarray): Binary mask of final wrinkle skeleton.
-    """
+def wrinkle_mask_overlay(rgb_image, color=(255, 0, 0), sigmas=[5]):
     gray = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2GRAY)
-    # gray = cv2.GaussianBlur(gray, (7, 7), sigmaX=2.0)
+    vessel_norm = compute_vesselness(gray, sigmas=sigmas)
 
-    # Predefined best CLAHE + Frangi settings
-    clahe_settings = [(8.0, (16, 16)), (10.0, (16, 16)), (12.0, (16, 16)), (14.0, (16, 16))]
+    vessel_binary = (vessel_norm > 0.2).astype(np.uint8)
+    skel = skeletonize(vessel_binary).astype(np.uint8) * 255
+    skeleton_final = skeletonize(skel > 0).astype(np.uint8)
 
-    skeleton_union = np.zeros_like(gray, dtype=np.uint8)
-
-    for clip, tile in clahe_settings:
-        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=tile)
-        clahe_img = clahe.apply(gray)
-        fr_input = clahe_img.astype(np.float32) / 255.0
-        fr = frangi(fr_input, black_ridges=True, sigmas=[15, 30, 45])
-        fr_norm = ((fr - fr.min()) / (np.ptp(fr) + 1e-9) * 255).astype(np.uint8)
-        _, fr_bin = cv2.threshold(fr_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        skel = skeletonize(fr_bin > 0).astype(np.uint8)
-        skeleton_union = np.logical_or(skeleton_union, skel).astype(np.uint8)
-
-    skeleton_final = skeletonize(skeleton_union > 0).astype(np.uint8)
-
-    # Filter out very short lines (area < 3)
+    # Filter out very short lines
     labeled = measure.label(skeleton_final, connectivity=2)
     props = measure.regionprops(labeled)
     clean_mask = np.zeros_like(skeleton_final, dtype=np.uint8)
@@ -1153,26 +1135,28 @@ def wrinkle_mask_overlay(rgb_image, color=(255, 0, 0)):
         if prop.area >= 3:
             clean_mask[labeled == prop.label] = 1
 
-    # Apply overlay on wrinkles
     overlay = rgb_image.copy()
     overlay[clean_mask > 0] = color
-
     return overlay, clean_mask
 
-@timer
-def compute_wrinkle_score(wrinkle_mask, mask):    ## modify this function
-  # Only consider pixels where mask is white (255)
-  valid_region = (mask == 255)
+def compute_wrinkle_score(wrinkle_mask, mask=None):
+    if mask is None:
+        mask = np.ones_like(wrinkle_mask, dtype=np.uint8) * 255
 
-  # Avoid division by zero if no valid pixels
-  if np.count_nonzero(valid_region) == 0:
-      return 0
+    valid_region = (mask == 255)
+    if np.count_nonzero(valid_region) == 0:
+        return 0
 
-  # Calculate wrinkle presence within valid region
-  raw_score = np.sum((wrinkle_mask > 0) & valid_region) / np.count_nonzero(valid_region)
-  score = round(min(raw_score / 0.02, 1.0) * 10,2)
-  return score
+    raw_score = np.sum((wrinkle_mask > 0) & valid_region) / np.count_nonzero(valid_region)
 
+    # Clamp input to [1, 2.5]
+    raw_score = max(1.0, min(raw_score, 2.5))
+
+    # Linear mapping from [1, 2.5] → [1, 9]
+    mapped_score = 1 + (raw_score - 1) * ((9 - 1) / (2.5 - 0.9))
+
+    # Cap at 9.5
+    return round(min(mapped_score, 9.5), 2)
 # # Run wrinkle overlay
 # selected_regions = [ 'forehead','left_side_eye', 'right_side_eye']
 # wrinkle_scores = {}
