@@ -10,11 +10,9 @@ import pika
 import time
 import signal
 import sys
-from multiprocessing import Process, Queue, freeze_support
 from skin_analysis import analyze_image_all_regions
 
 # --- Helpers ---
-# Recursively walks through your nested dict/lists, replacing any NaN or Inf float with None, so JSON serialization never breaks
 def clean_analysis_result(data):
     if isinstance(data, dict):
         return {k: clean_analysis_result(v) for k, v in data.items()}
@@ -24,14 +22,12 @@ def clean_analysis_result(data):
         return None
     return data
 
-# Downloads the JPEG/PNG from url via requests.get(), Converts it to a PIL image, then a NumPy RGB array, Raises on HTTP errors or timeouts.
 def process_image_from_url(url):
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
     img = Image.open(BytesIO(resp.content)).convert("RGB")
     return np.array(img)
 
-# If a message has permanently failed (3 retries), this: Parses the JSON body to get scanSessionId, Sends a “failed” POST to your ML_RESULT endpoint so your backend knows it errored out.
 def report_failure(body):
     try:
         message = orjson.loads(body)
@@ -41,7 +37,6 @@ def report_failure(body):
     except Exception as ex:
         print(f"⚠️ Could not report failure: {ex}")
 
-# Implements the “3‑retry” pattern:  Reads or sets header "x-attempts" 
 def republish_with_retry(body, props, ch, delivery_tag):
     headers = dict(props.headers or {})
     attempts = headers.get("x-attempts", 0) + 1
@@ -63,24 +58,6 @@ def republish_with_retry(body, props, ch, delivery_tag):
         report_failure(body)
     ch.basic_ack(delivery_tag=delivery_tag)
 
-def _ml_worker(arr, out_q):
-    out_q.put(analyze_image_all_regions(arr))
-
-
-# Record “last seen” time so you can auto‑exit if idle too long
-# Start a timer to measure end‑to‑end latency
-# Parse the JSON body for scanSessionId and imageUrl
-# Download the image with process_image_from_url
-# Fork a process to run analyze_image_all_regions(arr) (isolates your main worker if ML crashes)
-# Join the process and retrieve the result dict
-# Clean NaN/Inf with clean_analysis_result
-# Compute overall glow index from the per‑region scores
-# Build the POST payload, including regionMetrics array
-# Send it to your backend (test vs prod endpoint based on header x-test)
-# ACK the message on success, so RabbitMQ removes it
-# On exception: log error, call republish_with_retry to handle retries
-# Finally: print the total elapsed time and call check_idle_and_exit in case you’ve been idle too long
-
 def callback(ch, method, properties, body):
     global last_msg_time
     last_msg_time = time.time()
@@ -95,12 +72,10 @@ def callback(ch, method, properties, body):
         print(f"📨 Received scanSessionId={sid} | test={is_test}")
 
         arr = process_image_from_url(url)
+        print("✅ Image downloaded")
 
-        q = Queue()
-        p = Process(target=_ml_worker, args=(arr, q))
-        p.start()
-        result = q.get()
-        p.join()
+        result = analyze_image_all_regions(arr)
+        print("✅ ML analysis complete")
 
         clean = clean_analysis_result(result)
         glow_vals = [v for v in clean.get("glow_index", {}).values() if isinstance(v, (int, float))]
@@ -149,10 +124,6 @@ def connect():
     ch.queue_bind(exchange=SCAN_EXCHANGE, queue=SCAN_QUEUE, routing_key=SCAN_ROUTING_KEY)
     return conn, ch
 
-# If no message has arrived for more than MAX_IDLE seconds, it:
-# Prints an “idle” message
-# Closes RabbitMQ connection
-# Calls sys.exit(0) to quit the process entirely—avoiding idle billing
 def check_idle_and_exit():
     if time.time() - last_msg_time > MAX_IDLE:
         print(f"🛌 Idle for {int(time.time() - last_msg_time)}s; shutting down.")
@@ -170,9 +141,8 @@ def shutdown_handler(signum, frame):
             connection.close()
         sys.exit(0)
 
+# --- MAIN ---
 if __name__ == "__main__":
-    freeze_support()  # Required for multiprocessing on Windows
-
     print("🔧 Starting worker…")
     try:
         from dotenv import load_dotenv
