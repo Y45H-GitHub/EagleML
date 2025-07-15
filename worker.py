@@ -31,8 +31,12 @@ def process_image_from_url(url):
 def report_failure(body):
     try:
         message = orjson.loads(body)
-        sid = message.get("scanSessionId")
-        failure_payload = {"scanSessionId": sid, "status": "failed", "error": "max_retries_exceeded"}
+        sid = message.get("scanSessionId") or message.get("sessionId")
+        failure_payload = {
+            "scanSessionId": sid,
+            "status": "failed",
+            "error": "max_retries_exceeded"
+        }
         requests.post(ML_RESULT_ENDPOINT, json=failure_payload, timeout=5)
     except Exception as ex:
         print(f"⚠️ Could not report failure: {ex}")
@@ -65,11 +69,12 @@ def callback(ch, method, properties, body):
     sid = None
     try:
         msg = orjson.loads(body)
-        sid = msg.get("scanSessionId")
+        sid = msg.get("scanSessionId") or msg.get("sessionId")
         url = msg.get("imageUrl")
         is_test = properties.headers.get("x-test", False)
+        is_anon = properties.headers.get("x-anon", False)
 
-        print(f"📨 Received scanSessionId={sid} | test={is_test}")
+        print(f"📨 Received scanSessionId={sid} | test={is_test} | anon={is_anon}")
 
         arr = process_image_from_url(url)
         print("✅ Image downloaded")
@@ -81,8 +86,9 @@ def callback(ch, method, properties, body):
         glow_vals = [v for v in clean.get("glow_index", {}).values() if isinstance(v, (int, float))]
         overall = round(sum(glow_vals) / len(glow_vals), 2) if glow_vals else 0.0
 
+        # Build payload based on anon/client
         payload = {
-            "sessionId": sid,
+            "sessionId" if is_anon else "scanSessionId": sid,
             "overallGlowIndex": overall,
             "analysisMetadata": json.dumps(clean, allow_nan=False),
             "regionMetrics": [],
@@ -100,7 +106,7 @@ def callback(ch, method, properties, body):
                             "metricValue": float(val)
                         })
 
-        endpoint = ANON_RESULT_ENDPOINT if is_test else ML_RESULT_ENDPOINT
+        endpoint = ANON_RESULT_ENDPOINT if is_anon else ML_RESULT_ENDPOINT
         resp = requests.post(endpoint, json=payload, timeout=10)
         print(f"✅ Sent result to {endpoint} for {sid}, status {resp.status_code}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -151,12 +157,11 @@ if __name__ == "__main__":
     except ImportError:
         pass
 
-    # --- Config from environment ---
     SCAN_QUEUE = os.getenv("SCAN_QUEUE", "scan.queue")
     SCAN_EXCHANGE = os.getenv("SCAN_EXCHANGE", "scan.exchange")
     SCAN_ROUTING_KEY = os.getenv("SCAN_ROUTING_KEY", "scan.request")
     ML_RESULT_ENDPOINT = os.getenv("ML_RESULT_ENDPOINT")
-    ANON_RESULT_ENDPOINT = os.getenv("ANON_RESULT_ENDPOINT", "https://eagle-backend-v1-production.up.railway.app/api/anonscans/analysis")
+    ANON_RESULT_ENDPOINT = os.getenv("ANON_RESULT_ENDPOINT")
     RABBITMQ_URL = os.environ["RABBITMQ_URL"]
     MAX_IDLE = float(os.getenv("MAX_IDLE", "1200"))
     PREFETCH_COUNT = int(os.getenv("PREFETCH", "1"))
