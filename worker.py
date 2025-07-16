@@ -86,9 +86,8 @@ def callback(ch, method, properties, body):
         glow_vals = [v for v in clean.get("glow_index", {}).values() if isinstance(v, (int, float))]
         overall = round(sum(glow_vals) / len(glow_vals), 2) if glow_vals else 0.0
 
-        # Build payload based on anon/client
         payload = {
-            "sessionId" if is_anon else "scanSessionId": sid,
+            ("sessionId" if is_anon else "scanSessionId"): sid,
             "overallGlowIndex": overall,
             "analysisMetadata": json.dumps(clean, allow_nan=False),
             "regionMetrics": [],
@@ -117,7 +116,6 @@ def callback(ch, method, properties, body):
     finally:
         elapsed = time.perf_counter() - start_time
         print(f"⏱️ Total time for {sid if sid else 'message'}: {elapsed:.3f}s")
-        check_idle_and_exit()
 
 def connect():
     params = pika.URLParameters(RABBITMQ_URL)
@@ -130,23 +128,6 @@ def connect():
     ch.queue_bind(exchange=SCAN_EXCHANGE, queue=SCAN_QUEUE, routing_key=SCAN_ROUTING_KEY)
     return conn, ch
 
-def check_idle_and_exit():
-    if time.time() - last_msg_time > MAX_IDLE:
-        print(f"🛌 Idle for {int(time.time() - last_msg_time)}s; shutting down.")
-        connection.close()
-        sys.exit(0)
-
-def shutdown_handler(signum, frame):
-    print("🚫 Shutdown signal received; stopping consumer…")
-    try:
-        channel.stop_consuming()
-    except Exception:
-        pass
-    finally:
-        if connection.is_open:
-            connection.close()
-        sys.exit(0)
-
 # --- MAIN ---
 if __name__ == "__main__":
     print("🔧 Starting worker…")
@@ -157,31 +138,38 @@ if __name__ == "__main__":
     except ImportError:
         pass
 
-    SCAN_QUEUE = os.getenv("SCAN_QUEUE", "scan.queue")
-    SCAN_EXCHANGE = os.getenv("SCAN_EXCHANGE", "scan.exchange")
-    SCAN_ROUTING_KEY = os.getenv("SCAN_ROUTING_KEY", "scan.request")
-    ML_RESULT_ENDPOINT = os.getenv("ML_RESULT_ENDPOINT")
-    ANON_RESULT_ENDPOINT = os.getenv("ANON_RESULT_ENDPOINT")
-    RABBITMQ_URL = os.environ["RABBITMQ_URL"]
-    MAX_IDLE = float(os.getenv("MAX_IDLE", "1200"))
-    PREFETCH_COUNT = int(os.getenv("PREFETCH", "1"))
+    SCAN_QUEUE        = os.getenv("SCAN_QUEUE", "scan.queue")
+    SCAN_EXCHANGE     = os.getenv("SCAN_EXCHANGE", "scan.exchange")
+    SCAN_ROUTING_KEY  = os.getenv("SCAN_ROUTING_KEY", "scan.request")
+    ML_RESULT_ENDPOINT= os.getenv("ML_RESULT_ENDPOINT")
+    ANON_RESULT_ENDPOINT= os.getenv("ANON_RESULT_ENDPOINT")
+    RABBITMQ_URL      = os.environ["RABBITMQ_URL"]
+    MAX_IDLE          = float(os.getenv("MAX_IDLE", "1200"))
+    PREFETCH_COUNT    = int(os.getenv("PREFETCH", "1"))
+
     print("RabbitMQ URL:", RABBITMQ_URL)
-
-    signal.signal(signal.SIGTERM, shutdown_handler)
-    signal.signal(signal.SIGINT, shutdown_handler)
-
     connection, channel = connect()
     channel.basic_qos(prefetch_count=PREFETCH_COUNT)
-    print(f"✅ Connected to RabbitMQ (queue: {SCAN_QUEUE}, exchange: {SCAN_EXCHANGE}, routingKey: {SCAN_ROUTING_KEY})")
+    print(f"✅ Connected to RabbitMQ (queue: {SCAN_QUEUE}, exchange: {SCAN_EXCHANGE})")
 
+    # initialize last_msg_time so idle timer starts now
+    last_msg_time = time.time()
+
+    # consume setup
     channel.basic_consume(queue=SCAN_QUEUE, on_message_callback=callback)
     print("✅ Worker ready; waiting for messages…")
 
     try:
-        channel.start_consuming()
-    except Exception as e:
-        print(f"⚠️ Consumer stopped: {e}")
+        # instead of start_consuming, loop and periodically check idle
+        while True:
+            connection.process_data_events(time_limit=1)  # wait up to 1s for events
+            if time.time() - last_msg_time > MAX_IDLE:
+                print(f"🛌 Idle for {int(time.time() - last_msg_time)}s; shutting down.")
+                break
+    except KeyboardInterrupt:
+        print("👋 Shutdown requested")
     finally:
         if connection.is_open:
+            channel.stop_consuming()
             connection.close()
         print("👋 Worker shut down.")
